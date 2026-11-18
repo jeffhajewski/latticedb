@@ -12,7 +12,8 @@ follows the same rule: `lattice_node_set_property` and
 property out, and so do the JSON, JSONL and CSV importers. Setting,
 batch-inserting or searching vectors on a database created without a vector
 index now fails as unsupported, with a message that says why, instead of as an
-I/O error. The release also stops the repository tracking the TypeScript
+I/O error, and a Cypher `<=>` `WHERE` search there fails with a message that
+says the same instead of "could not create execution plan". The release also stops the repository tracking the TypeScript
 binding's coverage report.
 
 ## Fixes
@@ -69,6 +70,19 @@ binding's coverage report.
   from `set_vector`, `batch_insert_vectors` and both vector searches. Reading a
   vector on such a database still finds none and removing one still does
   nothing, as documented.
+- **A Cypher vector search on a database without a vector index says so.**
+  When the whole `WHERE` of a `MATCH` is a `<=>` predicate
+  (`WHERE n.embedding <=> $q < 0.5`, or `n.embedding <=> $q` on its own), the
+  planner answers it with the vector index. On a database created without one,
+  0.18.0 failed with "Plan error: could not create execution plan". It now
+  fails at the same stage, with the same error code, and the message "This
+  database was created without a vector index, so `WHERE ... <=> ...` has no
+  index to search. Open it with vectors enabled and vector dimensions set to add
+  one." The diagnostic code is `MissingVectorIndex`. `<=>` used as an
+  expression is unchanged: in an `ORDER BY`, a `RETURN`, a `WITH` or a `WHERE`
+  that combines it with other conditions it still measures an ordinary
+  `embedding` property row by row with cosine, as documented, and a node
+  without that property has a null distance and sorts last.
 - **The TypeScript coverage report is no longer tracked.**
   `bindings/typescript/coverage/`, which `npm run test:coverage` rewrites on
   every run, was committed, so a coverage run left the working tree dirty. It is
@@ -99,8 +113,11 @@ binding's coverage report.
   "Unsupported operation or value type": the bindings supply the specific
   message. `lattice_node_set_vector` also returns -14 for a key other than
   `"embedding"` or `""`, as before; the bindings tell the two apart by the key.
-- Cypher is unaffected: on a database without a vector index `embedding` is an
-  ordinary property, so Cypher never reaches the vector index there.
+- Cypher reaches the vector index only through a `<=>` `WHERE` search, which
+  now fails with its own message on a database without one (see Fixes). The C
+  code is unchanged: a plan failure is `LATTICE_ERROR` (-1), as an undeclared
+  full-text index in `@@` is, not the `LATTICE_ERROR_UNSUPPORTED` the vector
+  API calls return.
 
 ## Upgrade Notes
 
@@ -168,3 +185,6 @@ binding's coverage report.
   suites has a test that checks the error type and message.
 - `git status` stays clean after `npm run test:coverage` in
   `bindings/typescript`.
+- A new integration test checks that the `<=>` `WHERE` search fails with the
+  missing-index message on a database without a vector index, and that `<=>`
+  in a combined `WHERE` and in `ORDER BY` still measures there.

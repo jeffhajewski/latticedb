@@ -362,3 +362,45 @@ test "lvc: without a vector index SET n.embedding is an ordinary property" {
     defer result.deinit();
     try std.testing.expectEqualStrings("text", result.rows[0].values[0].string_val);
 }
+
+test "lvc: without a vector index a <=> WHERE search says so, and <=> elsewhere still measures" {
+    // Up to 0.18.0 the search form failed with "Plan error: could not create
+    // execution plan", which does not say what is missing.
+    const path = "/tmp/lvc_cypher_vector_search_noindex.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var db = try openDb(path, true, false);
+    defer db.close();
+    try run(db, "CREATE (:D {name: 'near', embedding: [1.0, 0.1]}), (:D {name: 'far', embedding: [0.0, 1.0]}), (:D {name: 'none'})");
+
+    for ([_][]const u8{
+        "MATCH (n:D) WHERE n.embedding <=> [1.0, 0.0] < 0.5 RETURN n.name",
+        "MATCH (n:D) WHERE n.embedding <=> [1.0, 0.0] RETURN n.name LIMIT 1",
+    }) |cypher| {
+        var detailed = try db.queryDetailed(cypher);
+        defer detailed.deinit();
+        switch (detailed) {
+            .success => return error.TestUnexpectedResult,
+            .failure => |f| {
+                try std.testing.expectEqual(lattice.storage.database.QueryFailureStage.plan, f.stage);
+                try std.testing.expect(std.mem.indexOf(u8, f.message, "created without a vector index") != null);
+                try std.testing.expectEqualStrings("MissingVectorIndex", f.code.?);
+            },
+        }
+    }
+
+    // `<=>` as an expression measures the ordinary `embedding` property row by
+    // row, with cosine, as it did before: in a combined WHERE and in ORDER BY,
+    // where a node without the property has a null distance and sorts last.
+    var filtered = try db.query("MATCH (n:D) WHERE n.name <> 'x' AND n.embedding <=> [1.0, 0.0] < 0.5 RETURN n.name");
+    defer filtered.deinit();
+    try std.testing.expectEqual(@as(usize, 1), filtered.rowCount());
+    try std.testing.expectEqualStrings("near", filtered.rows[0].values[0].string_val);
+    var ordered = try db.query("MATCH (n:D) RETURN n.name ORDER BY n.embedding <=> [1.0, 0.0] LIMIT 3");
+    defer ordered.deinit();
+    try std.testing.expectEqual(@as(usize, 3), ordered.rowCount());
+    for ([_][]const u8{ "near", "far", "none" }, ordered.rows) |want, row| {
+        try std.testing.expectEqualStrings(want, row.values[0].string_val);
+    }
+}

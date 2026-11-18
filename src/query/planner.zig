@@ -94,6 +94,9 @@ pub const PlannerError = error{
     /// `@@` was used on a variable whose pattern carries no label, so there is
     /// nothing to resolve the property against.
     UnlabeledFtsMatch,
+    /// A `<=>` WHERE asks for a vector index search on a database created
+    /// without a vector index.
+    MissingVectorIndex,
 };
 
 /// Storage context for planning (references to storage structures)
@@ -2765,7 +2768,15 @@ pub const QueryPlanner = struct {
 
     /// Plan a vector search operator
     fn planVectorSearch(self: *Self, input: Operator, info: VectorSearchInfo, limit_hint: VectorLimitHint) PlannerError!Operator {
-        _ = self.storage.hnsw_index orelse return PlannerError.MissingStorage;
+        // Up to 0.18.0 this was the generic "could not create execution plan".
+        if (self.storage.hnsw_index == null) {
+            self.setPlanDetail(
+                "This database was created without a vector index, so `WHERE ... <=> ...` has no index to search. " ++
+                    "Open it with vectors enabled and vector dimensions set to add one.",
+                .{},
+            );
+            return PlannerError.MissingVectorIndex;
+        }
         const database = self.storage.database orelse return PlannerError.MissingStorage;
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;

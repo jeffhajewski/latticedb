@@ -50,6 +50,14 @@ among their nodes:
   sorting.
 - **With neither**: the 100 nearest candidate nodes.
 
+On a database created without a vector index there is no index to search, so a
+`WHERE` of this form fails at planning with a message that says so: "This
+database was created without a vector index, so `WHERE ... <=> ...` has no index
+to search." (Before 0.18.1 the message was "Plan error: could not create
+execution plan".) Opening the database with vectors enabled and its dimensions
+set adds an index. The forms below that measure row by row still run there,
+over an ordinary `embedding` property.
+
 So the label narrows the search (`MATCH (c:Chunk)` returns Chunk nodes even when
 other nodes are nearer), and a threshold query returns every match, however many.
 When the candidates are few next to the index (fewer than about

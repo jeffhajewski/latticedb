@@ -188,3 +188,11 @@ binding's coverage report.
 - A new integration test checks that the `<=>` `WHERE` search fails with the
   missing-index message on a database without a vector index, and that `<=>`
   in a combined `WHERE` and in `ORDER BY` still measures there.
+- `ON CREATE SET` and `ON MATCH SET` on a node `MERGE` with no variable
+  (`MERGE (:A) ON CREATE SET m.x = 1`) were already refused by semantic
+  analysis, with "ON CREATE SET requires a variable on the MERGE target
+  pattern", before anything ran, so no statement reached the planner code that
+  handled them. That code would have applied each `x.key = value` to the merged
+  node whatever `x` named and dropped label and map items; it now refuses them
+  with the same message. A new test checks every kind of item fails and writes
+  nothing. No behaviour changes.

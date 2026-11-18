@@ -162,6 +162,37 @@ test "cypher: MERGE on an existing property still matches" {
     try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (n:Rare) RETURN count(n)"));
 }
 
+test "cypher: ON CREATE SET and ON MATCH SET on a MERGE node without a variable fail and write nothing" {
+    // No item can name the merged node, so each kind is refused rather than
+    // applied somewhere else or dropped.
+    const path = "/tmp/lattice_cs_merge_anonymous_set.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:M {name: 'm'}), (:Old)");
+
+    for ([_][]const u8{
+        "MATCH (m:M) MERGE (:A) ON CREATE SET m.x = 1",
+        "MATCH (m:M) MERGE (:A) ON CREATE SET m:L",
+        "MATCH (m:M) MERGE (:A) ON CREATE SET m += {y: 2}",
+        "MATCH (m:M) MERGE (:A) ON CREATE SET m = {z: 3}",
+        "MATCH (m:M) MERGE (:Old) ON MATCH SET m.x = 1",
+        "MATCH (m:M) MERGE (:Old) ON MATCH SET m:L",
+    }) |cypher| {
+        var detailed = try db.queryDetailed(cypher);
+        defer detailed.deinit();
+        switch (detailed) {
+            .success => {
+                std.debug.print("\nquery should have failed: {s}\n", .{cypher});
+                return error.TestUnexpectedResult;
+            },
+            .failure => |f| try std.testing.expect(std.mem.indexOf(u8, f.message, "requires a variable on the MERGE target pattern") != null),
+        }
+    }
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:A) RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:L) RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n) WHERE n.x IS NOT NULL OR n.y IS NOT NULL OR n.z IS NOT NULL RETURN count(n)"));
+}
+
 // ============================================================================
 // Integer arithmetic
 // ============================================================================

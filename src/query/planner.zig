@@ -4242,22 +4242,21 @@ pub const QueryPlanner = struct {
                 properties = kvs;
             }
 
+            // ON CREATE SET and ON MATCH SET can only name the merged node by
+            // its variable. Semantic analysis refuses them on a MERGE without
+            // one; this refuses them too rather than guess what an item means.
+            // (It used to apply each `x.key = value` to the merged node whatever
+            // `x` named, and drop label and map items.)
             var on_create_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
             if (merge_clause.on_create) |items| {
-                if (node_pattern.variable) |name| {
-                    on_create_props = try self.extractSetPropertiesForTarget(items, name);
-                } else {
-                    on_create_props = try self.extractSetProperties(items);
-                }
+                const name = node_pattern.variable orelse return self.refuseAnonymousMergeSet("ON CREATE SET");
+                on_create_props = try self.extractSetPropertiesForTarget(items, name);
             }
 
             var on_match_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
             if (merge_clause.on_match) |items| {
-                if (node_pattern.variable) |name| {
-                    on_match_props = try self.extractSetPropertiesForTarget(items, name);
-                } else {
-                    on_match_props = try self.extractSetProperties(items);
-                }
+                const name = node_pattern.variable orelse return self.refuseAnonymousMergeSet("ON MATCH SET");
+                on_match_props = try self.extractSetPropertiesForTarget(items, name);
             }
 
             const materialized_input: ?Operator = if (input) |inp| try self.materializeInput(inp) else null;
@@ -4424,24 +4423,11 @@ pub const QueryPlanner = struct {
         return mat.operator();
     }
 
-    /// Extract property key-value pairs from SET items (for MERGE ON CREATE/ON MATCH)
-    fn extractSetProperties(self: *Self, items: []const ast.SetItem) PlannerError![]const mutation_ops.CreateNode.PropertyKV {
-        var kvs: std.ArrayList(mutation_ops.CreateNode.PropertyKV) = .empty;
-        defer kvs.deinit(self.allocator);
-
-        for (items) |item| {
-            switch (item) {
-                .property => |p| {
-                    kvs.append(self.allocator, .{
-                        .key = p.property_name,
-                        .value_expr = p.value,
-                    }) catch return PlannerError.OutOfMemory;
-                },
-                else => {}, // Labels and map operations not supported in MERGE ON CREATE/MATCH
-            }
-        }
-
-        return kvs.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
+    /// The failure for ON CREATE SET or ON MATCH SET on a MERGE node that has
+    /// no variable, which no item can name.
+    fn refuseAnonymousMergeSet(self: *Self, comptime clause_name: []const u8) PlannerError {
+        self.setPlanDetail(clause_name ++ " requires a variable on the MERGE target pattern", .{});
+        return PlannerError.InvalidQuery;
     }
 
     /// Extract SET property key/value pairs for a specific target variable.

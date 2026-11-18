@@ -67,6 +67,15 @@ RETURN n
 `ON MATCH` applies to every node that matched. Setting a property to null in
 either removes it, as `SET` does.
 
+On a node `MERGE` both take property assignments to the merged node, named by
+its variable. Anything else is refused before the statement runs, and nothing is
+written: an item on another variable ("ON CREATE SET currently supports only
+assignments to 'n.*'"), a label or a property map (`SET n:Label`,
+`SET n += {...}`, "currently supports only property assignments"), and any item
+at all when the `MERGE` node has no variable, as in `MERGE (:Person {name:
+"Alice"}) ON CREATE SET ...` ("ON CREATE SET requires a variable on the MERGE
+target pattern").
+
 ## MERGE Edges
 
 ```cypher

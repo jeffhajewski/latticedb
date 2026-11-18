@@ -6,7 +6,7 @@
 
   <groupId>io.latticedb</groupId>
   <artifactId>latticedb</artifactId>
-  <version>0.18.0</version>
+  <version>0.18.1</version>
   <packaging>jar</packaging>
 
   <name>LatticeDB Java Bindings</name>

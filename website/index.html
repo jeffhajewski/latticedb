@@ -723,43 +723,40 @@ footer .footer-links {
 <!-- Release Notes -->
 <section class="release-notes">
   <div class="container">
-    <h2>What's new in 0.18.0</h2>
-    <p class="caption">Read, replace and remove a node's vector, from every binding and from Cypher.</p>
+    <h2>What's new in 0.18.1</h2>
+    <p class="caption">A null removes a property on every write path, and vector calls say when there is no index.</p>
     <div class="release-grid">
       <div class="release-card">
-        <h3>Vector API</h3>
+        <h3>Null Properties</h3>
         <ul>
-          <li>Read the vector a node holds with <code>get_vector</code></li>
-          <li><code>remove_vector</code> takes it out of search and keeps the node</li>
-          <li>In C, Python, TypeScript, Go and Java</li>
-          <li>A removal commits with its transaction and survives a crash</li>
+          <li><code>SET n += {x: null}</code> removes <code>x</code>, as Cypher specifies</li>
+          <li><code>CREATE</code> and <code>SET n = {...}</code> leave a null out</li>
+          <li>Setting a property to null through the API removes it</li>
+          <li>JSON and CSV import leave null properties out</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Cypher</h3>
+        <h3>Vector Errors</h3>
         <ul>
-          <li><code>SET n.embedding = $vector</code> stores the node's vector</li>
-          <li>So does an <code>embedding</code> key in <code>CREATE</code> and <code>MERGE</code></li>
-          <li><code>REMOVE n.embedding</code> and <code>SET n.embedding = null</code> remove it</li>
-          <li>A value that cannot be a vector fails the statement</li>
+          <li>Without a vector index, vector calls fail as unsupported, not as an I/O error</li>
+          <li>The message says the database has no vector index</li>
+          <li>A refused batch insert leaves no node behind</li>
+          <li>A Cypher <code>&lt;=&gt;</code> search there says the same</li>
         </ul>
       </div>
       <div class="release-card">
         <h3>Compatibility</h3>
         <ul>
           <li>No change to the file or the log format</li>
-          <li>0.17.0 opens a database 0.18.0 has written</li>
-          <li>The C API only gains functions; none change</li>
-          <li>Python's <code>Node.get_vector</code> and <code>Node.set_vector</code> are deprecated</li>
+          <li>Nulls an earlier version stored read back until removed</li>
+          <li>A relationship <code>MERGE</code> on a null property now fails</li>
+          <li>The C API keeps every signature</li>
         </ul>
       </div>
     </div>
     <p class="release-meta">
-      On a database with a vector index, Cypher writes to <code>embedding</code> now reach the
-      vector instead of an ordinary property: read the upgrade notes if you use that name.
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.18.0.md">Read the 0.18.0 release notes</a>
-      &middot;
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.17.0.md">0.17.0 release notes</a>
+      0.18.1 is a patch on 0.18.0, which added reading, removing and Cypher-setting a node's vector.
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.18.1.md">Read the 0.18.1 release notes</a>
     </p>
   </div>
 </section>

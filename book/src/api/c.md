@@ -1085,7 +1085,7 @@ lattice_query_cache_stats(db, &entries, &hits, &misses);
 
 ```c
 // Get version string
-const char* version = lattice_version();  // e.g. "0.18.0"
+const char* version = lattice_version();  // e.g. "0.18.1"
 
 // Get error message ("Unknown error" for a code the library does not define)
 const char* msg = lattice_error_message(LATTICE_ERROR_NOT_FOUND);

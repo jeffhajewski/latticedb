@@ -325,11 +325,12 @@ them in the file. Replay looks for each of the three and adds what is missing
 endpoints or another type, its traversal keys are removed first, whichever of
 them exist. Up to 0.18.1 the redo of an edge was "delete it if its record exists,
 then create it", which fails on a traversal key without a record; those releases
-never wrote such a file, so they never met one. A file that a newer release left
-in that state has to be recovered by the newer release. It is rare for an older
-one to be asked: 0.18 cannot open a format-5 file at all, and can open an older
-file this release has written only read-only, where its replay runs on an
-in-memory overlay, fails with `IoError`, and leaves the file as it was.
+never wrote such a file, so they never met one. They are not asked to recover one
+either. 0.18 cannot open a format-5 file at all. A file in the older layout that
+this release has written is one 0.18 may read but not write, and replaying a log
+counts as writing: while the log holds work, 0.18.1 refuses the file with
+`NeedsNewerWriter`, read-only opens included, and leaves it unchanged. Once this
+release has opened it and recovered, 0.18.1 reads it again.
 
 The vector index needed an exception. Inserting a vector the index already holds is
 a replacement, which unlinks the node from its neighbours and links it again, and

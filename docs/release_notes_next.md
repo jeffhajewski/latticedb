@@ -125,17 +125,15 @@ Use this file as the draft for the next release after `0.18.1`.
   older files open to 0.17 and 0.18.
 - No converter yet: an existing database keeps the old layout until it is
   exported and imported into a new one.
-- **Recover a crashed database with this release, not an older one.** A large
-  commit now writes all of its relationships' tree entries before their records,
-  and a crash in between can leave entries without a record in the file. This
-  release's recovery completes them from the log. Recovery in 0.18.1 and
-  earlier expects every relationship to be whole or absent and fails on one
-  that is neither. It only matters for a database in the old layout (created
-  by 0.18 or earlier, or with `new_database_id_keys = .little`) that crashed
-  under this release during a commit of 64 or more new relationships: 0.17 and
-  0.18 can open such a file only read-only, and that open fails with an I/O
-  error until this release has opened it once. The file is not changed by the
-  failed open.
+- **A crashed database is recovered by this release, not an older one.** That
+  was already so: 0.17 and 0.18 may read, but not write, a file this release has
+  written, and they refuse it outright while its log still holds work to replay
+  (`LATTICE_ERROR_NEEDS_NEWER_WRITER`, the file left unchanged). It matters a
+  little more now, because a large commit writes all of its relationships' tree
+  entries before their records, and a crash in between leaves entries without
+  a record in the file, which only this release's recovery completes. Checked
+  with 0.18.1 on an old-layout file interrupted that way: refused before
+  recovery, read correctly after this release had opened it once.
 - For loads, prefer large transactions (100,000 relationships or more) over
   many small ones; a transaction holds 600 to 700 bytes of memory per row until
   it commits.

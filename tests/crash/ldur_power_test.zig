@@ -73,3 +73,11 @@ test "power loss: no log, so whole transactions up to the last flush" {
 test "power loss: no log, with vectors and full-text" {
     try sweep(.{ .seed = 7, .txns = 25, .random_cuts = 20, .no_log = true, .vectors = true, .fts = true, .pool_pages = 40 });
 }
+
+test "power loss: a file with little-endian id keys, vectors and full-text" {
+    try sweep(.{ .seed = 8, .txns = 25, .random_cuts = 20, .vectors = true, .fts = true, .pool_pages = 40, .legacy_id_keys = true });
+}
+
+test "power loss: a file with little-endian id keys, no log" {
+    try sweep(.{ .seed = 9, .txns = 25, .random_cuts = 20, .no_log = true, .big_values = true, .legacy_id_keys = true });
+}

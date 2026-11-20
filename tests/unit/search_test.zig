@@ -294,7 +294,7 @@ test "fts: bm25 ranks higher term frequency higher" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Doc1: "apple" appears once
     // Doc2: "apple" appears three times
@@ -324,7 +324,7 @@ test "fts: bm25 penalizes long documents" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Both docs have "database" once, but doc2 is much longer
     _ = try index.indexDocument(1, "database systems");
@@ -348,7 +348,7 @@ test "fts: idf gives rare terms more weight" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // "common" appears in all docs, "rare" appears in one
     _ = try index.indexDocument(1, "common word document");
@@ -378,7 +378,7 @@ test "fts: document removal makes doc unsearchable" {
     var lengths_tree = try BTree.init(allocator, db.bp);
     var reverse_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{}, .big);
 
     _ = try index.indexDocument(1, "unique term alpha");
     _ = try index.indexDocument(2, "unique term beta");
@@ -416,7 +416,7 @@ test "fts: empty query returns no results" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     _ = try index.indexDocument(1, "some content here");
 
@@ -433,7 +433,7 @@ test "fts: nonexistent term returns no results" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     _ = try index.indexDocument(1, "apple banana cherry");
 
@@ -450,7 +450,7 @@ test "fts: case insensitive search" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     _ = try index.indexDocument(1, "Apple BANANA Cherry");
 
@@ -476,7 +476,7 @@ test "fts: and semantics requires all terms" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     _ = try index.indexDocument(1, "apple banana");
     _ = try index.indexDocument(2, "apple cherry");
@@ -508,7 +508,7 @@ test "fts: or semantics matches any term" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     _ = try index.indexDocument(1, "apple only");
     _ = try index.indexDocument(2, "banana only");
@@ -535,7 +535,7 @@ test "fts: exclusion removes matching docs" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     _ = try index.indexDocument(1, "database mysql optimization");
     _ = try index.indexDocument(2, "database postgres optimization");
@@ -561,7 +561,7 @@ test "fts: phrase search requires adjacent terms" {
 
     var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{
         .store_positions = true,
-    });
+    }, .big);
 
     // Note: "and" is a stop word and gets removed, so use non-stop words
     _ = try index.indexDocument(1, "quick brown fox"); // has "quick brown" adjacent
@@ -585,7 +585,7 @@ test "fts: stats reflect actual document count" {
     var lengths_tree = try BTree.init(allocator, db.bp);
     var reverse_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{}, .big);
 
     // Initially empty
     var stats = try index.getStats();
@@ -615,7 +615,7 @@ test "fts: limit caps results correctly" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Index 20 documents with common term
     for (1..21) |i| {
@@ -639,7 +639,7 @@ test "fts: indexing thousands of repeated terms remains responsive" {
     var dict_tree = try BTree.init(allocator, db.bp);
     var lengths_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     for (1..3001) |i| {
         var buf: [256]u8 = undefined;
@@ -669,7 +669,7 @@ test "fts: reindex oversized document purges stale terms via dictionary scan" {
     var lengths_tree = try BTree.init(allocator, db.bp);
     var reverse_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{}, .big);
 
     // Build a document whose unique-term list is larger than a single btree
     // leaf page, forcing indexDocument to skip populating the reverse index.
@@ -712,7 +712,7 @@ test "fts: reindex same document updates content" {
     var lengths_tree = try BTree.init(allocator, db.bp);
     var reverse_tree = try BTree.init(allocator, db.bp);
 
-    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{});
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{}, .big);
 
     // Index original content
     _ = try index.indexDocument(1, "original content alpha");

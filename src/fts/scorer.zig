@@ -13,6 +13,7 @@ const BTree = btree.BTree;
 const ScopedTree = @import("scoped_tree.zig").ScopedTree;
 const BTreeError = btree.BTreeError;
 const NodeId = lattice.core.types.NodeId;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 
 const posting = @import("posting.zig");
 const DocId = posting.DocId;
@@ -79,6 +80,8 @@ const DocLengthEntry = extern struct {
 pub const DocLengthStore = struct {
     allocator: Allocator,
     tree: ScopedTree,
+    /// How document keys encode document ids; the file decides it.
+    id_keys: IdKeyOrder,
     stats: DocStats,
 
     const Self = @This();
@@ -103,10 +106,11 @@ pub const DocLengthStore = struct {
     /// score after a reopen was computed against an empty corpus: the inverse
     /// document frequency had no document count to work from and the length
     /// normalisation had no average to compare against.
-    pub fn init(allocator: Allocator, tree: ScopedTree) Self {
+    pub fn init(allocator: Allocator, tree: ScopedTree, id_keys: IdKeyOrder) Self {
         var self = Self{
             .allocator = allocator,
             .tree = tree,
+            .id_keys = id_keys,
             .stats = DocStats{
                 .total_docs = 0,
                 .total_tokens = 0,
@@ -194,8 +198,7 @@ pub const DocLengthStore = struct {
 
     /// Set document length (updates stats)
     pub fn setLength(self: *Self, doc_id: DocId, length: u32) ScorerError!void {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, doc_id, .little);
+        const key_buf = self.id_keys.encode(doc_id);
 
         // Check if document already exists and get old length
         var old_length: ?u32 = null;
@@ -242,8 +245,7 @@ pub const DocLengthStore = struct {
 
     /// Get document length
     pub fn getLength(self: *Self, doc_id: DocId) ScorerError!u32 {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, doc_id, .little);
+        const key_buf = self.id_keys.encode(doc_id);
 
         const result = self.tree.get(&key_buf) catch |err| {
             return mapBTreeError(err);
@@ -269,21 +271,23 @@ pub const DocLengthStore = struct {
     pub fn getLengths(self: *Self, doc_ids: []const DocId, out: []?u32, order: []u32) ScorerError!void {
         std.debug.assert(doc_ids.len == out.len and doc_ids.len == order.len);
         for (order, 0..) |*o, i| o.* = @intCast(i);
-        // Keys are little-endian doc ids compared as bytes, which is the
-        // numeric order of the byte-swapped id.
-        std.mem.sort(u32, order, doc_ids, struct {
-            fn lessThan(ids: []const DocId, a: u32, b: u32) bool {
-                return @byteSwap(ids[a]) < @byteSwap(ids[b]);
+        // In the order of their keys, which is id order only when the
+        // file's id keys are big-endian.
+        const Context = struct {
+            ids: []const DocId,
+            id_keys: IdKeyOrder,
+            fn lessThan(ctx: @This(), a: u32, b: u32) bool {
+                return ctx.id_keys.keyLessThan(ctx.ids[a], ctx.ids[b]);
             }
-        }.lessThan);
+        };
+        std.mem.sort(u32, order, Context{ .ids = doc_ids, .id_keys = self.id_keys }, Context.lessThan);
 
         var lookup: ScopedTree.SortedLookup = undefined;
         lookup.init(self.tree) catch |err| return mapBTreeError(err);
         defer lookup.deinit();
 
         for (order) |i| {
-            var key_buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &key_buf, doc_ids[i], .little);
+            const key_buf = self.id_keys.encode(doc_ids[i]);
             const value = lookup.get(&key_buf) catch |err| return mapBTreeError(err);
             out[i] = if (value) |v| blk: {
                 if (v.len < @sizeOf(DocLengthEntry)) break :blk null;
@@ -294,8 +298,7 @@ pub const DocLengthStore = struct {
 
     /// Remove document and update stats
     pub fn removeDoc(self: *Self, doc_id: DocId) ScorerError!void {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, doc_id, .little);
+        const key_buf = self.id_keys.encode(doc_id);
 
         // Get current length before removing
         const result = self.tree.get(&key_buf) catch |err| {
@@ -320,8 +323,7 @@ pub const DocLengthStore = struct {
 
     /// Check if a document exists
     pub fn contains(self: *Self, doc_id: DocId) bool {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, doc_id, .little);
+        const key_buf = self.id_keys.encode(doc_id);
 
         return self.tree.contains(&key_buf) catch false;
     }
@@ -469,7 +471,7 @@ test "bm25 score calculation" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var doc_lengths = DocLengthStore.init(allocator, ScopedTree.unscoped(&tree));
+    var doc_lengths = DocLengthStore.init(allocator, ScopedTree.unscoped(&tree), .big);
 
     // Add some documents
     try doc_lengths.setLength(1, 100); // Doc 1: 100 tokens
@@ -522,7 +524,7 @@ test "doc length store operations" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
-    var store = DocLengthStore.init(allocator, ScopedTree.unscoped(&tree));
+    var store = DocLengthStore.init(allocator, ScopedTree.unscoped(&tree), .big);
 
     // Initially empty
     try std.testing.expectEqual(@as(u64, 0), store.stats.total_docs);

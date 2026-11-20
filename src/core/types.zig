@@ -40,21 +40,47 @@ pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 
 /// File format version.
 ///
-/// 4 added the node id counter and the vector index configuration to the
-/// file header, past the end of the header 3 knows (see `FileHeader`), and
-/// ordered property indexes, whose entries 0.16.0 (format 3) would read as
-/// if they were digests and so answer every lookup with nothing.
-pub const FORMAT_VERSION: u16 = 4;
+/// 4 (0.17.0) added the node id counter and the vector index configuration
+/// to the file header, past the end of the header 3 knows (see `FileHeader`),
+/// and ordered property indexes, whose entries 0.16.0 (format 3) would read
+/// as if they were digests and so answer every lookup with nothing.
+///
+/// 5 writes ids as big-endian B-tree keys, so ids handed out in order are
+/// stored in order (see `id_key.zig`). Only files created in format 5 use
+/// that layout, and they say so in the header (`FileFlags.ORDERED_ID_KEYS`)
+/// and require a format-5 reader. A file created earlier keeps its
+/// little-endian keys and stays readable by format-4 releases.
+pub const FORMAT_VERSION: u16 = 5;
 
 /// The `min_reader_version` this release writes for a file that uses nothing
 /// a format-3 reader (0.16.0) would misread. Such a reader ignores the
 /// format-4 header fields and drops them when it writes the header, which
-/// this release notices and recovers from, so it is not locked out. A file
-/// whose vector index uses a metric or connection count format 3 cannot
-/// express, that holds an ordered property index, or with a full-text index
-/// that stores positions (which 0.16.0 would damage by appending to it),
-/// gets FORMAT_VERSION instead.
+/// this release notices and recovers from, so it is not locked out. What
+/// does raise the version, and to what, is listed in
+/// `FileHeader.ReaderReason`: a file that holds any of it needs at least
+/// `REASONS_READER_VERSION`, and a file with ordered id keys
+/// `ORDERED_ID_KEYS_READER_VERSION`.
 pub const MIN_READER_VERSION: u16 = 3;
+
+/// The `min_reader_version` of a file holding something format 4 introduced
+/// that 0.16.0 would misread rather than refuse: a vector index whose metric
+/// or connection count format 3 cannot express, an ordered property index,
+/// changefeed events in the compact format, or a full-text index that stores
+/// positions. Every format-4 release (0.17.0 on) reads all of them, so they
+/// require 4, not this release's format: a file that holds them but keeps
+/// little-endian id keys stays open to 0.17.x and 0.18.x.
+pub const REASONS_READER_VERSION: u16 = 4;
+
+/// The `min_reader_version` of a file whose id keys are big-endian. A
+/// format-4 release would read those keys as little-endian ids and find
+/// nothing where it looked, so it has to refuse the file.
+pub const ORDERED_ID_KEYS_READER_VERSION: u16 = 5;
+
+comptime {
+    std.debug.assert(MIN_READER_VERSION < REASONS_READER_VERSION);
+    std.debug.assert(REASONS_READER_VERSION < ORDERED_ID_KEYS_READER_VERSION);
+    std.debug.assert(ORDERED_ID_KEYS_READER_VERSION <= FORMAT_VERSION);
+}
 
 /// Property value - a tagged union supporting multiple types
 pub const PropertyValue = union(enum) {

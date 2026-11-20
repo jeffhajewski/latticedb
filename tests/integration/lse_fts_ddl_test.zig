@@ -75,7 +75,9 @@ test "fts ddl: an index that stores positions keeps 0.16.0 from opening the file
         @import("compat").fs.cwd().deleteFile(p ++ "-wal") catch {};
         defer @import("compat").fs.cwd().deleteFile(p) catch {};
         defer @import("compat").fs.cwd().deleteFile(p ++ "-wal") catch {};
-        var config: lattice.storage.database.DatabaseConfig = .{ .enable_fts = true, .enable_vector = false };
+        // Little-endian id keys, as 0.16.0 wrote: a format-5 file shuts it
+        // out from the start, which would hide the raise.
+        var config: lattice.storage.database.DatabaseConfig = .{ .enable_fts = true, .enable_vector = false, .new_database_id_keys = .little };
         config.fts_config.store_positions = positions;
         // Changefeed events would raise the version on their own.
         config.changefeed_retention = .off;
@@ -94,9 +96,9 @@ test "fts ddl: an index that stores positions keeps 0.16.0 from opening the file
         }
         // 0.16.0 appends without position counts to a page whose entries
         // carry them, so once the index stores positions the file asks for
-        // a reader of this format.
+        // a reader of format 4, the first that keeps them.
         const on_disk = try minReaderOnDisk(p);
-        try std.testing.expectEqual(if (positions) types.FORMAT_VERSION else types.MIN_READER_VERSION, on_disk.version);
+        try std.testing.expectEqual(if (positions) types.REASONS_READER_VERSION else types.MIN_READER_VERSION, on_disk.version);
         const Reason = lattice.storage.page.FileHeader.ReaderReason;
         try std.testing.expectEqual(if (positions) Reason.fulltext_positions else @as(u16, 0), on_disk.reasons);
     }

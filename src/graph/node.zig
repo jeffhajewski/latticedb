@@ -1,7 +1,9 @@
 //! Node Storage for Property Graph.
 //!
 //! Stores nodes using a B+Tree with:
-//!   Key: node_id (u64)
+//!   Key: node_id (u64, eight bytes in the file's id key order: big-endian
+//!        in a format-5 file, little-endian in one created earlier; see
+//!        `id_key.zig`)
 //!   Value: NodeData (serialized)
 //!
 //! NodeData format:
@@ -24,6 +26,7 @@ const BTreeError = btree.BTreeError;
 const NodeId = types.NodeId;
 const PropertyValue = types.PropertyValue;
 const SymbolId = symbols.SymbolId;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 
 /// Node storage errors
 pub const NodeError = error{
@@ -72,15 +75,18 @@ pub const Node = struct {
 pub const NodeStore = struct {
     allocator: Allocator,
     tree: *BTree,
+    /// How the tree's keys encode node ids; the file decides it.
+    id_keys: IdKeyOrder,
     next_id: NodeId,
 
     const Self = @This();
 
-    /// Initialize node store with a B+Tree
-    pub fn init(allocator: Allocator, tree: *BTree) Self {
+    /// Initialize node store with a B+Tree whose keys are in `id_keys` order.
+    pub fn init(allocator: Allocator, tree: *BTree, id_keys: IdKeyOrder) Self {
         var self = Self{
             .allocator = allocator,
             .tree = tree,
+            .id_keys = id_keys,
             .next_id = 1, // Start from 1, 0 is reserved for NULL
         };
         self.next_id = self.loadNextId() catch 1;
@@ -93,10 +99,11 @@ pub const NodeStore = struct {
     /// is right for a tree that does not exist yet and wrong for one that
     /// does: the next node created would take the id of an existing node and
     /// replace it. Here a failed scan is an error.
-    pub fn initChecked(allocator: Allocator, tree: *BTree) NodeError!Self {
+    pub fn initChecked(allocator: Allocator, tree: *BTree, id_keys: IdKeyOrder) NodeError!Self {
         var self = Self{
             .allocator = allocator,
             .tree = tree,
+            .id_keys = id_keys,
             .next_id = 1,
         };
         self.next_id = try self.loadNextId();
@@ -106,10 +113,11 @@ pub const NodeStore = struct {
     /// `init` with the counter already known, from where the database keeps
     /// it, so nothing is scanned. `next_id` must be above every id the tree
     /// holds or has held.
-    pub fn initAt(allocator: Allocator, tree: *BTree, next_id: NodeId) Self {
+    pub fn initAt(allocator: Allocator, tree: *BTree, id_keys: IdKeyOrder, next_id: NodeId) Self {
         return .{
             .allocator = allocator,
             .tree = tree,
+            .id_keys = id_keys,
             .next_id = @max(next_id, 1),
         };
     }
@@ -128,7 +136,7 @@ pub const NodeStore = struct {
             return mapBTreeError(err);
         }) |entry| {
             if (entry.key.len != 8) continue;
-            const node_id = std.mem.readInt(u64, entry.key[0..8], .little);
+            const node_id = self.id_keys.decode(entry.key[0..8]);
             if (node_id > max_id) max_id = node_id;
         }
 
@@ -144,8 +152,7 @@ pub const NodeStore = struct {
         defer self.allocator.free(serialized);
 
         // Create key from node_id
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         // Insert into B+Tree
         self.tree.insert(&key_buf, serialized) catch |err| {
@@ -172,8 +179,7 @@ pub const NodeStore = struct {
         defer self.allocator.free(serialized);
 
         // Create key from node_id
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         // Insert into B+Tree
         self.tree.insert(&key_buf, serialized) catch |err| {
@@ -203,8 +209,7 @@ pub const NodeStore = struct {
 
     /// Get a node by ID
     pub fn get(self: *Self, node_id: NodeId) NodeError!Node {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         const data = self.tree.getBorrowed(&key_buf) catch |err| {
             return mapBTreeError(err);
@@ -228,8 +233,7 @@ pub const NodeStore = struct {
     /// query reading `n.name` needs one value, so this walks the stored
     /// record and decodes only that one.
     pub fn getProperty(self: *Self, node_id: NodeId, key_id: SymbolId, allocator: Allocator) NodeError!?PropertyValue {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         const serialized = (self.tree.get(&key_buf) catch |err| return mapBTreeError(err)) orelse
             return NodeError.NotFound;
@@ -240,8 +244,7 @@ pub const NodeStore = struct {
     /// A node's label ids, copied into `allocator`, without decoding its
     /// properties.
     pub fn getLabelIds(self: *Self, node_id: NodeId, allocator: Allocator) NodeError![]SymbolId {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         const serialized = (self.tree.get(&key_buf) catch |err| return mapBTreeError(err)) orelse
             return NodeError.NotFound;
@@ -264,8 +267,7 @@ pub const NodeStore = struct {
     ) NodeError!?PropertyValue {
         if (cache.node_id != node_id) {
             cache.node_id = null;
-            var key_buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &key_buf, node_id, .little);
+            const key_buf = self.id_keys.encode(node_id);
             const serialized = (self.tree.get(&key_buf) catch |err| return mapBTreeError(err)) orelse
                 return NodeError.NotFound;
             defer self.tree.freeValue(serialized);
@@ -284,8 +286,7 @@ pub const NodeStore = struct {
 
     /// Update a node's properties
     pub fn update(self: *Self, node_id: NodeId, labels: []const SymbolId, properties: []const Property) NodeError!void {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         const serialized = try self.serializeNodeAlloc(labels, properties);
         defer self.allocator.free(serialized);
@@ -300,8 +301,7 @@ pub const NodeStore = struct {
 
     /// Delete a node
     pub fn delete(self: *Self, node_id: NodeId) NodeError!void {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         self.tree.delete(&key_buf) catch |err| {
             return mapBTreeError(err);
@@ -310,8 +310,7 @@ pub const NodeStore = struct {
 
     /// Check if a node exists
     pub fn exists(self: *Self, node_id: NodeId) NodeError!bool {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
 
         return self.tree.contains(&key_buf) catch |err| {
             return switch (err) {
@@ -329,8 +328,7 @@ pub const NodeStore = struct {
         labels: []const SymbolId,
         properties: []const Property,
     ) bool {
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        const key_buf = self.id_keys.encode(node_id);
         return self.tree.canFitLeafEntry(&key_buf, serializedNodeSize(labels, properties));
     }
 };
@@ -738,7 +736,7 @@ test "node store create and get" {
 
     var tree = try BTree.init(allocator, &bp);
 
-    var store = NodeStore.init(allocator, &tree);
+    var store = NodeStore.init(allocator, &tree, .big);
 
     // Create a node with labels and properties
     const labels = [_]SymbolId{ 1000, 1001 }; // "Person", "Employee"
@@ -785,7 +783,7 @@ test "node store not found" {
 
     var tree = try BTree.init(allocator, &bp);
 
-    var store = NodeStore.init(allocator, &tree);
+    var store = NodeStore.init(allocator, &tree, .big);
 
     try std.testing.expectError(NodeError.NotFound, store.get(999));
     try std.testing.expect(!(try store.exists(999)));
@@ -815,7 +813,7 @@ test "node store exists" {
 
     var tree = try BTree.init(allocator, &bp);
 
-    var store = NodeStore.init(allocator, &tree);
+    var store = NodeStore.init(allocator, &tree, .big);
 
     try std.testing.expect(!(try store.exists(1)));
 
@@ -848,7 +846,7 @@ test "node store delete" {
 
     var tree = try BTree.init(allocator, &bp);
 
-    var store = NodeStore.init(allocator, &tree);
+    var store = NodeStore.init(allocator, &tree, .big);
 
     // Create a node
     const node_id = try store.create(&[_]SymbolId{1000}, &[_]Property{});
@@ -886,11 +884,61 @@ test "node store reload continues monotonic ids" {
 
     var tree = try BTree.init(allocator, &bp);
 
-    var store = NodeStore.init(allocator, &tree);
+    var store = NodeStore.init(allocator, &tree, .big);
     try std.testing.expectEqual(@as(NodeId, 1), try store.create(&[_]SymbolId{1000}, &[_]Property{}));
 
-    var reopened = NodeStore.init(allocator, &tree);
+    var reopened = NodeStore.init(allocator, &tree, .big);
     try std.testing.expectEqual(@as(NodeId, 2), try reopened.create(&[_]SymbolId{1000}, &[_]Property{}));
+}
+
+test "node store finds the next id and reads nodes back in either id key order" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    for ([_]IdKeyOrder{ .little, .big }) |order| {
+        const db_path = "/tmp/lattice_node_key_order_test.db";
+        vfs_impl.delete(db_path) catch {};
+        var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true, .new_file_id_keys = order });
+        defer {
+            pm.deinit();
+            vfs_impl.delete(db_path) catch {};
+        }
+        var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+        defer bp.deinit();
+        var tree = try BTree.init(allocator, &bp);
+
+        // Past 256, where little-endian keys stop sorting in id order.
+        var store = NodeStore.init(allocator, &tree, order);
+        for (1..301) |i| try std.testing.expectEqual(@as(NodeId, i), try store.create(&[_]SymbolId{1000}, &[_]Property{}));
+
+        var reopened = try NodeStore.initChecked(allocator, &tree, order);
+        try std.testing.expectEqual(@as(NodeId, 301), reopened.next_id);
+        var node = try reopened.get(257);
+        defer node.deinit(allocator);
+        try std.testing.expectEqual(@as(NodeId, 257), node.id);
+
+        // The keys are the order's encoding, and the tree holds them in key order.
+        const expected = order.encode(256);
+        try std.testing.expect(try tree.contains(&expected));
+        var iter = try tree.range(null, null);
+        defer iter.deinit();
+        var previous: ?NodeId = null;
+        var ascending = true;
+        while (try iter.next()) |entry| {
+            const id = order.decode(entry.key[0..8]);
+            if (previous) |p| if (id < p) {
+                ascending = false;
+            };
+            previous = id;
+        }
+        try std.testing.expectEqual(order == .big, ascending);
+    }
 }
 
 test "property value list serialization round-trip" {

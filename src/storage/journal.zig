@@ -387,7 +387,7 @@ test "journal: a journal from another database is not applied" {
     // A database file with a real header, so its identity can be read.
     const db = try files.posix.vfs().open(files.db_path, .{ .read = true, .write = true, .create = true });
     defer db.close();
-    var header = page.FileHeader.init();
+    var header = page.FileHeader.init(.big);
     header.file_uuid = [_]u8{1} ** 16;
     var header_page = [_]u8{0} ** BLOCK;
     @memcpy(header_page[0..@sizeOf(page.FileHeader)], std.mem.asBytes(&header));

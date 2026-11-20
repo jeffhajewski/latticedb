@@ -12,6 +12,7 @@ const lattice = @import("lattice");
 
 // Core types
 const types = lattice.core.types;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 const PageId = types.PageId;
 const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
@@ -487,6 +488,20 @@ pub const DatabaseConfig = struct {
     /// Retention acts at checkpoints (without a log, at flushes) and on
     /// `trimChangefeed`, oldest events first. `off` writes no events at all.
     changefeed_retention: ?changefeed_mod.Retention = null,
+
+    /// How a database this open creates writes ids as B-tree keys.
+    ///
+    /// `.big`, the default, is format 5: node, edge and document ids are
+    /// stored in id order, so ids handed out in sequence append to the
+    /// trees, which stay full, and scans return ascending ids. Such a file
+    /// needs this release or a later one to open it. `.little` lays the
+    /// file out as 0.17 and 0.18 do, slower to load and larger, but those
+    /// releases can still open it (read-only, once this release has written
+    /// it; see `FileHeader.min_writer_version`).
+    ///
+    /// Only a new database takes this. An existing file keeps the order it
+    /// was created with, whatever this says: the order is part of the file.
+    new_database_id_keys: IdKeyOrder = .big,
 
     pub const SyncMode = enum { full, normal };
 
@@ -1312,6 +1327,10 @@ pub const Database = struct {
 
     // Configuration
     config: DatabaseConfig,
+    /// How this file writes ids as keys in the node tree, the edge id index,
+    /// the full-text document trees and the vector index's node tree. Read
+    /// from the header when the file is opened and fixed from then on.
+    id_key_order: IdKeyOrder,
     path: []const u8,
     read_only: bool,
     /// Set when the file at `path` was created by `deserialize` and exists only
@@ -1493,6 +1512,7 @@ pub const Database = struct {
             .read_only = options.read_only,
             .page_size = options.page_size,
             .lock = options.lock,
+            .new_file_id_keys = options.config.new_database_id_keys,
         }) catch |err| {
             return switch (err) {
                 PageManagerError.FileNotFound => DatabaseError.FileNotFound,
@@ -1507,6 +1527,7 @@ pub const Database = struct {
             };
         };
         errdefer self.page_manager.deinit();
+        self.id_key_order = self.page_manager.getHeader().idKeyOrder();
 
         // 2b. The vector index, configured as the file records it. A file
         // with a vector index opens with it whatever the options say, and
@@ -1630,7 +1651,7 @@ pub const Database = struct {
         // Setting up the trees saves their roots, and saving the roots
         // stores the node id counter. Until the node store is set up below,
         // the counter stored is the one the header already holds.
-        self.node_store = .{ .allocator = allocator, .tree = &self.node_tree, .next_id = header.next_node_id };
+        self.node_store = .{ .allocator = allocator, .tree = &self.node_tree, .id_keys = self.id_key_order, .next_id = header.next_node_id };
 
         if (is_new) {
             try self.initNewTrees();
@@ -1662,16 +1683,16 @@ pub const Database = struct {
         // opened for writing with its id counter reset to 1.
         const stored_next_node_id = header.storedNextNodeId();
         self.node_store = if (stored_next_node_id) |next_id|
-            NodeStore.initAt(allocator, &self.node_tree, next_id)
+            NodeStore.initAt(allocator, &self.node_tree, self.id_key_order, next_id)
         else if (is_new or options.read_only)
-            NodeStore.initAt(allocator, &self.node_tree, 1)
+            NodeStore.initAt(allocator, &self.node_tree, self.id_key_order, 1)
         else
-            NodeStore.initChecked(allocator, &self.node_tree) catch return DatabaseError.IoError;
+            NodeStore.initChecked(allocator, &self.node_tree, self.id_key_order) catch return DatabaseError.IoError;
         // The same goes for the edge id counter.
         self.edge_store = if (is_new or options.read_only)
-            EdgeStore.init(allocator, &self.edge_tree, &self.edge_id_tree)
+            EdgeStore.init(allocator, &self.edge_tree, &self.edge_id_tree, self.id_key_order)
         else
-            EdgeStore.initChecked(allocator, &self.edge_tree, &self.edge_id_tree) catch return DatabaseError.IoError;
+            EdgeStore.initChecked(allocator, &self.edge_tree, &self.edge_id_tree, self.id_key_order) catch return DatabaseError.IoError;
         self.label_index = LabelIndex.init(allocator, &self.label_tree);
         self.initializePropertyIndex();
 
@@ -1685,6 +1706,7 @@ pub const Database = struct {
                 &self.fts_lengths_tree,
                 if (self.fts_reverse_tree) |*t| t else null,
                 options.config.fts_config,
+                self.id_key_order,
             );
         }
 
@@ -1733,7 +1755,7 @@ pub const Database = struct {
                     if (self.hnsw_index) |*hnsw| {
                         var loaded = false;
                         if (self.hnsw_node_tree) |*tree| {
-                            if (hnsw.loadFromTree(tree)) |ok| {
+                            if (hnsw.loadFromTree(tree, self.id_key_order)) |ok| {
                                 loaded = ok;
                             } else |_| {
                                 hnsw.resetForRebuild();
@@ -1858,7 +1880,7 @@ pub const Database = struct {
                 self.hnsw_node_tree = BTree.init(self.allocator, &self.buffer_pool) catch return DatabaseError.IoError;
             }
             if (self.hnsw_node_tree) |*tree| {
-                hnsw.saveToTree(tree) catch return DatabaseError.IoError;
+                hnsw.saveToTree(tree, self.id_key_order) catch return DatabaseError.IoError;
             }
         }
     }
@@ -3252,10 +3274,12 @@ pub const Database = struct {
     ) DatabaseError!void {
         _ = writer_txn_id;
         // In id order where the ids can be sorted, so that the label index
-        // and the node tree receive a transaction's keys in key order and
-        // fill their pages densely, instead of in hash-map order, which
-        // splits them down the middle. Order does not change the outcome:
-        // each state is applied on its own.
+        // and, in a format-5 file, the node tree and the edge id index
+        // receive a transaction's keys in key order and fill their pages
+        // densely, instead of in hash-map order, which splits them down the
+        // middle. (A file created before format 5 has little-endian id keys,
+        // where id order is not key order; its label index still benefits.)
+        // Order does not change the outcome: each state is applied on its own.
         // Reading the stored states has sorted them already.
         if (overlay.sortedNodeIds()) |ids| {
             for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?, overlay.stored_nodes.get(node_id));
@@ -4327,7 +4351,7 @@ pub const Database = struct {
     fn closePropertyIndexesToOlderReaders(self: *Self) DatabaseError!void {
         const header = self.page_manager.getHeader();
         const reason = page_mod.FileHeader.ReaderReason.ordered_property_index;
-        if (header.min_reader_version < types.FORMAT_VERSION or header.readerReasons() & reason == 0) {
+        if (!header.requiresReaderFor(reason)) {
             var raised = header.*;
             raised.raiseMinReader(reason);
             self.page_manager.updateHeader(&raised) catch return DatabaseError.IoError;
@@ -4541,6 +4565,7 @@ pub const Database = struct {
             &self.fts_lengths_tree,
             if (self.fts_reverse_tree) |*t| t else null,
             self.config.fts_config,
+            self.id_key_order,
             fts_catalog_mod.scopePrefix(definition),
         );
     }
@@ -6595,9 +6620,10 @@ pub const Database = struct {
 
     /// Ids of every node `txn` sees, ascending.
     ///
-    /// The node tree's keys are little-endian, so its own order is not id
-    /// order (256 before 2); the ids are sorted so that `MATCH (n)` comes
-    /// back in the order a label scan does.
+    /// In a file created before format 5 the node tree's keys are
+    /// little-endian, so its own order is not id order (256 before 2), and
+    /// the overlay's ids come after the tree's in any file; the ids are
+    /// sorted so that `MATCH (n)` comes back in the order a label scan does.
     fn collectVisibleNodeIds(self: *Self, txn: ?*Transaction) DatabaseError![]NodeId {
         var ids: std.ArrayListUnmanaged(NodeId) = .empty;
         errdefer ids.deinit(self.allocator);
@@ -6612,7 +6638,7 @@ pub const Database = struct {
             const entry = iter.next() catch return DatabaseError.IoError;
             if (entry) |e| {
                 if (e.key.len < 8) continue;
-                const node_id = std.mem.readInt(u64, e.key[0..8], .little);
+                const node_id = self.id_key_order.decode(e.key[0..8]);
                 // The overlay decides every node it holds; it is walked below.
                 if (has_node_states and overlay.?.node_states.contains(node_id)) continue;
                 try ids.append(self.allocator, node_id);

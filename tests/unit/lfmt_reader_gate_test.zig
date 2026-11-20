@@ -3,6 +3,12 @@
 //! describe, an ordered property index, a full-text index that stores word
 //! positions. 0.16.0 refuses a file whose `min_reader_version` is above its
 //! format (3).
+//!
+//! Those raises are only visible in a file with little-endian id keys,
+//! which is what these tests create (`new_database_id_keys = .little`): a
+//! format-5 file requires a format-5 reader from the start. They raise the
+//! version to 4, not to this release's format, so such a file stays open to
+//! 0.17 and 0.18. The last tests check the format-5 file.
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -38,7 +44,7 @@ fn onDisk(comptime path: []const u8) !OnDisk {
 }
 
 fn config(enable_wal: bool) DatabaseConfig {
-    return .{ .enable_wal = enable_wal, .enable_fts = false, .enable_vector = false, .enable_query_cache = false };
+    return .{ .enable_wal = enable_wal, .enable_fts = false, .enable_vector = false, .enable_query_cache = false, .new_database_id_keys = .little };
 }
 
 fn openRw(comptime path: []const u8, cfg: DatabaseConfig, create: bool) !*Database {
@@ -104,8 +110,8 @@ test "lfmt gate: the first changefeed event raises the reader version on disk be
         try std.testing.expect(try countChanges(db) > 0);
         // On disk already, with the database still open and nothing
         // checkpointed.
-        try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
-        try std.testing.expectEqual(types.FORMAT_VERSION, db.page_manager.getHeader().min_reader_version);
+        try std.testing.expectEqual(OnDisk{ .version = types.REASONS_READER_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
+        try std.testing.expectEqual(types.REASONS_READER_VERSION, db.page_manager.getHeader().min_reader_version);
     }
 }
 
@@ -134,14 +140,14 @@ test "lfmt gate: a commit that fails after staging its events raises nothing, an
         // The retry restages and commits; the raise happens with it.
         _ = try db.createNode(&txn, &.{"Person"});
         try db.commitTransaction(&txn);
-        try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
+        try std.testing.expectEqual(OnDisk{ .version = types.REASONS_READER_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
         const after_retry = try countChanges(db);
         try std.testing.expect(after_retry > 0);
 
         // Later commits find it raised and write nothing more to the header
         // in place: the bytes stay as the raise left them until a flush.
         try commitNode(db);
-        try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
+        try std.testing.expectEqual(OnDisk{ .version = types.REASONS_READER_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
         // One more node's events, half as many as the two the retry
         // committed: the failed attempt left none behind.
         try std.testing.expectEqual(after_retry + after_retry / 2, try countChanges(db));
@@ -190,7 +196,7 @@ test "lfmt gate: once raised the version stays, also after every event is droppe
         defer db.close();
         try commitNode(db);
     }
-    try std.testing.expectEqual(types.FORMAT_VERSION, (try onDisk(path)).version);
+    try std.testing.expectEqual(types.REASONS_READER_VERSION, (try onDisk(path)).version);
 
     // Switching the changefeed off drops every event it holds.
     var cfg = config(true);
@@ -203,7 +209,7 @@ test "lfmt gate: once raised the version stays, also after every event is droppe
         try std.testing.expect(status.oldest_sequence == null);
         try commitNode(db);
     }
-    try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
+    try std.testing.expectEqual(OnDisk{ .version = types.REASONS_READER_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
 }
 
 test "lfmt gate: the other raises record their reason beside the changefeed's" {
@@ -222,7 +228,7 @@ test "lfmt gate: the other raises record their reason beside the changefeed's" {
         try commitNode(db);
     }
     const disk = try onDisk(path);
-    try std.testing.expectEqual(types.FORMAT_VERSION, disk.version);
+    try std.testing.expectEqual(types.REASONS_READER_VERSION, disk.version);
     try std.testing.expectEqual(Reason.vector_index | Reason.ordered_property_index | Reason.changefeed_events, disk.reasons);
 }
 
@@ -244,5 +250,62 @@ test "lfmt gate: a full-text index that stores positions records its reason, wit
         try db.setNodeProperty(&txn, id, "text", .{ .string_val = "the quick brown fox" });
         try db.commitTransaction(&txn);
     }
-    try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.fulltext_positions }, try onDisk(path));
+    try std.testing.expectEqual(OnDisk{ .version = types.REASONS_READER_VERSION, .reasons = Reason.fulltext_positions }, try onDisk(path));
+}
+
+test "lfmt gate: a format-5 file requires a format-5 reader from creation, and the other reasons add to it" {
+    const path = "/tmp/lfmt_gate_ordered_keys.db";
+    cleanup(path);
+    defer cleanup(path);
+
+    var cfg = config(true);
+    cfg.new_database_id_keys = .big;
+    {
+        const db = try openRw(path, cfg, true);
+        defer db.close();
+        try std.testing.expectEqual(lattice.core.id_key.IdKeyOrder.big, db.id_key_order);
+    }
+    try std.testing.expectEqual(OnDisk{ .version = types.ORDERED_ID_KEYS_READER_VERSION, .reasons = Reason.ordered_id_keys }, try onDisk(path));
+
+    {
+        const db = try openRw(path, cfg, false);
+        defer db.close();
+        try commitNode(db);
+    }
+    try std.testing.expectEqual(OnDisk{
+        .version = types.ORDERED_ID_KEYS_READER_VERSION,
+        .reasons = Reason.ordered_id_keys | Reason.changefeed_events,
+    }, try onDisk(path));
+}
+
+test "lfmt gate: the id key order is the file's, not the open's" {
+    inline for (.{ .little, .big }) |created| {
+        const path = "/tmp/lfmt_gate_key_order_kept.db";
+        cleanup(path);
+        defer cleanup(path);
+        var cfg = config(true);
+        cfg.new_database_id_keys = created;
+        {
+            const db = try openRw(path, cfg, true);
+            defer db.close();
+            try commitNode(db);
+        }
+        // Asking for the other order on an existing file changes nothing.
+        cfg.new_database_id_keys = if (created == .big) .little else .big;
+        {
+            const db = try openRw(path, cfg, false);
+            defer db.close();
+            try std.testing.expectEqual(@as(lattice.core.id_key.IdKeyOrder, created), db.id_key_order);
+            try commitNode(db);
+            const ids = try db.getAllNodeIdsInTxn(null);
+            defer db.allocator.free(ids);
+            try std.testing.expectEqualSlices(u64, &.{ 1, 2 }, ids);
+        }
+        const version = (try onDisk(path)).version;
+        if (created == .big) {
+            try std.testing.expectEqual(types.ORDERED_ID_KEYS_READER_VERSION, version);
+        } else {
+            try std.testing.expectEqual(types.REASONS_READER_VERSION, version);
+        }
+    }
 }

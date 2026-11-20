@@ -1640,7 +1640,7 @@ fn collectCanonicalNodeIds(
             const entry = iter.next() catch return ImportExportError.DatabaseError;
             if (entry) |e| {
                 if (e.key.len == node_key_size) {
-                    try node_ids.append(allocator, std.mem.readInt(NodeId, e.key[0..node_key_size], .little));
+                    try node_ids.append(allocator, db.id_key_order.decode(e.key[0..node_key_size]));
                 }
             } else {
                 break;

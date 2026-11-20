@@ -13,6 +13,7 @@ const lattice = @import("lattice");
 const Allocator = std.mem.Allocator;
 
 const types = lattice.core.types;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 const page = lattice.storage.page;
 const buffer_pool = lattice.storage.buffer_pool;
 const vec_storage = lattice.vector.storage;
@@ -2129,10 +2130,13 @@ pub const HnswIndex = struct {
     /// the metadata. The whole map is rewritten the first time, after a
     /// rebuild, or when change tracking could not keep up. Either way the tree
     /// ends up holding exactly the node map, so loading is unaffected.
-    pub fn saveToTree(self: *Self, tree: *BTree) HnswError!void {
+    ///
+    /// The tree's keys are vector ids in `id_keys` order, the file's; the
+    /// metadata key is all 0xFF bytes in either order.
+    pub fn saveToTree(self: *Self, tree: *BTree, id_keys: IdKeyOrder) HnswError!void {
         if (!self.dirty) return;
         try self.unlinkDangling();
-        if (self.needs_full_save) return self.saveAllToTree(tree);
+        if (self.needs_full_save) return self.saveAllToTree(tree, id_keys);
 
         try self.saveMetadata(tree);
 
@@ -2140,8 +2144,7 @@ pub const HnswIndex = struct {
         // rewriting an entry that already made it is harmless.
         var iter = self.unsaved.keyIterator();
         while (iter.next()) |vector_id| {
-            var key_buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &key_buf, vector_id.*, .little);
+            const key_buf = id_keys.encode(vector_id.*);
             tree.delete(&key_buf) catch |err| switch (err) {
                 BTreeError.KeyNotFound => {},
                 else => return HnswError.StorageError,
@@ -2170,7 +2173,7 @@ pub const HnswIndex = struct {
     }
 
     /// Rewrite the whole node map, dropping entries for ids no longer in it.
-    fn saveAllToTree(self: *Self, tree: *BTree) HnswError!void {
+    fn saveAllToTree(self: *Self, tree: *BTree, id_keys: IdKeyOrder) HnswError!void {
         var stale_keys: std.ArrayListUnmanaged(u64) = .empty;
         defer stale_keys.deinit(self.allocator);
 
@@ -2185,7 +2188,7 @@ pub const HnswIndex = struct {
                 if (e.key.len != 8) continue;
                 if (std.mem.eql(u8, e.key, &METADATA_KEY)) continue;
 
-                const vector_id = std.mem.readInt(u64, e.key[0..8], .little);
+                const vector_id = id_keys.decode(e.key[0..8]);
                 if (!self.nodes.contains(vector_id)) {
                     stale_keys.append(self.allocator, vector_id) catch return HnswError.OutOfMemory;
                 }
@@ -2195,8 +2198,7 @@ pub const HnswIndex = struct {
         try self.saveMetadata(tree);
 
         for (stale_keys.items) |vector_id| {
-            var key_buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &key_buf, vector_id, .little);
+            const key_buf = id_keys.encode(vector_id);
             tree.delete(&key_buf) catch |err| switch (err) {
                 BTreeError.KeyNotFound => {},
                 else => return HnswError.StorageError,
@@ -2205,8 +2207,7 @@ pub const HnswIndex = struct {
 
         var iter = self.nodes.iterator();
         while (iter.next()) |entry| {
-            var key_buf: [8]u8 = undefined;
-            std.mem.writeInt(u64, &key_buf, entry.key_ptr.*, .little);
+            const key_buf = id_keys.encode(entry.key_ptr.*);
 
             var val_buf: [HnswNodeEntry.SERIALIZED_SIZE]u8 = undefined;
             entry.value_ptr.serialize(&val_buf);
@@ -2225,7 +2226,7 @@ pub const HnswIndex = struct {
 
     /// Load the HNSW index state from a B+Tree.
     /// Returns true if successfully loaded, false if no persisted state found.
-    pub fn loadFromTree(self: *Self, tree: *BTree) HnswError!bool {
+    pub fn loadFromTree(self: *Self, tree: *BTree, id_keys: IdKeyOrder) HnswError!bool {
         // 1. Look up metadata sentinel
         const meta_val = tree.get(&METADATA_KEY) catch return HnswError.StorageError;
         if (meta_val == null) return false;
@@ -2259,7 +2260,7 @@ pub const HnswIndex = struct {
 
             // Deserialize into an owned struct (no pointers into B+Tree page)
             const node_entry = HnswNodeEntry.deserialize(e.value[0..HnswNodeEntry.SERIALIZED_SIZE]);
-            const vector_id = std.mem.readInt(u64, e.key[0..8], .little);
+            const vector_id = id_keys.decode(e.key[0..8]);
             if (node_entry.vector_id != vector_id or
                 node_entry.max_layer > self.connection_pool.maxSupportedLevel())
             {

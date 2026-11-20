@@ -127,6 +127,7 @@ test "fts space: compact removes the index releases before 0.15.0 kept, and noth
         &db.fts_lengths_tree,
         if (db.fts_reverse_tree) |*t| t else null,
         .{},
+        .big,
     );
     for (1..801) |doc| {
         var buf: [64]u8 = undefined;

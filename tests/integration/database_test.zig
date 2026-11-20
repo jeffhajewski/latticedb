@@ -69,8 +69,7 @@ fn planScanKind(
 }
 
 fn overwriteEdgePayloadWithInvalidData(db: *Database, edge_id: u64) !void {
-    var id_key: [8]u8 = undefined;
-    std.mem.writeInt(u64, &id_key, edge_id, .little);
+    const id_key = db.id_key_order.encode(edge_id);
     try db.edge_store.edge_id_index.delete(&id_key);
     try db.edge_store.edge_id_index.insert(&id_key, "bad");
 }
@@ -5070,7 +5069,6 @@ test "database: scoped full-text views stay out of each other's way" {
     const still_there = (try body.get("bread")).?;
     defer body.freeValue(still_there);
     try std.testing.expectEqualStrings("B1", still_there);
-
 }
 
 test "database: a full-text index whose prefix ends in 0xff iterates completely" {
@@ -5095,7 +5093,6 @@ test "database: a full-text index whose prefix ends in 0xff iterates completely"
     try edge.iterateAll(&it);
     while (try it.next()) |_| count += 1;
     try std.testing.expectEqual(@as(usize, 2), count);
-
 }
 
 /// Free what `ftsSearchIndex` returned.

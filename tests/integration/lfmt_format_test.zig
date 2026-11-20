@@ -33,12 +33,15 @@ fn readHeader(path: []const u8) !FileHeader {
 
 /// Leave the header page as 0.16.0 writes it: format 3, and nothing past the
 /// end of its own header struct. This is a file 0.16.0 created, or one it has
-/// written to since this release did.
+/// written to since this release did. Only a file with little-endian id keys
+/// (`legacy_config`) can be one: 0.16.0 never opens a format-5 file.
 fn writeHeaderAs016(path: []const u8) !void {
     const file = try @import("compat").fs.cwd().openFile(path, .{ .mode = .read_write });
     defer file.close();
     var buf: [4096]u8 = undefined;
     _ = try file.preadAll(&buf, 0);
+    const flags = std.mem.readInt(u32, buf[@offsetOf(FileHeader, "flags")..][0..4], .little);
+    try std.testing.expect(flags & lattice.storage.page.FileFlags.ORDERED_ID_KEYS == 0);
     std.mem.writeInt(u16, buf[4..6], 3, .little); // format_version
     std.mem.writeInt(u16, buf[6..8], 3, .little); // min_reader_version
     @memset(buf[FileHeader.LEGACY_SIZE..], 0);
@@ -59,6 +62,8 @@ fn patchHeader(path: []const u8, comptime field: []const u8, value: anytype) !vo
 }
 
 const plain_config = DatabaseConfig{ .enable_fts = false };
+/// A file laid out as 0.16.0 to 0.18 lay one out: little-endian id keys.
+const legacy_config = DatabaseConfig{ .enable_fts = false, .new_database_id_keys = .little };
 
 // ============================================================================
 // Node id counter
@@ -120,7 +125,7 @@ test "lfmt: a 0.16.0 file gets its node id counter by one scan, then keeps it" {
     defer cleanup(path);
 
     {
-        var db = try Database.open(allocator, path, .{ .create = true, .config = plain_config });
+        var db = try Database.open(allocator, path, .{ .create = true, .config = legacy_config });
         defer db.close();
         for (0..5) |_| _ = try db.createNode(null, &.{"A"});
     }
@@ -274,7 +279,7 @@ test "lfmt: a file that needs a newer writer opens read-only and refuses writabl
     }
     const created = try readHeader(path);
     try std.testing.expectEqual(types.FORMAT_VERSION, created.min_writer_version);
-    try std.testing.expectEqual(types.MIN_READER_VERSION, created.min_reader_version);
+    try std.testing.expectEqual(types.ORDERED_ID_KEYS_READER_VERSION, created.min_reader_version);
 
     // What a later release writes when the file holds something this one
     // would not keep correct: readable here, not writable.
@@ -301,7 +306,7 @@ test "lfmt: no min_writer_version means no restriction, and a write records this
     defer cleanup(path);
 
     {
-        var db = try Database.open(allocator, path, .{ .create = true, .config = plain_config });
+        var db = try Database.open(allocator, path, .{ .create = true, .config = legacy_config });
         db.close();
     }
     // Zero with the format-4 fields present, as well as a 0.16.0 header.
@@ -334,6 +339,7 @@ test "lfmt: a file or log in a format too new to read is VersionTooNew, read-onl
         defer db.close();
         _ = try db.createNode(null, &.{"A"});
     }
+    const original_min_reader = (try readHeader(path)).min_reader_version;
     try patchHeader(path, "min_reader_version", types.FORMAT_VERSION + 1);
     const before = try readHeaderPage(path);
     try std.testing.expectError(DatabaseError.VersionTooNew, Database.open(allocator, path, .{ .config = plain_config }));
@@ -342,7 +348,7 @@ test "lfmt: a file or log in a format too new to read is VersionTooNew, read-onl
     try std.testing.expectEqualSlices(u8, &before, &after);
 
     // The log has a version of its own.
-    try patchHeader(path, "min_reader_version", types.MIN_READER_VERSION);
+    try patchHeader(path, "min_reader_version", original_min_reader);
     {
         const file = try @import("compat").fs.cwd().openFile(path ++ "-wal", .{ .mode = .read_write });
         defer file.close();
@@ -395,7 +401,9 @@ test "lfmt: a database with vectors opens with them without vector options" {
     try std.testing.expectEqual(@as(u16, 24), stored.m_max0);
     try std.testing.expectEqual(@as(u16, 80), stored.ef_construction);
     // m = 12 is not what 0.16.0 assumes, so 0.16.0 must refuse the file.
-    try std.testing.expectEqual(types.FORMAT_VERSION, header.min_reader_version);
+    // (This file has ordered id keys, so it needs format 5 anyway.)
+    try std.testing.expect(header.min_reader_version >= types.REASONS_READER_VERSION);
+    try std.testing.expect(header.readerReasons() & FileHeader.ReaderReason.vector_index != 0);
 
     // No vector options at all, read-write and read-only.
     inline for (.{ false, true }) |read_only| {
@@ -484,7 +492,7 @@ test "lfmt: a 0.16.0 file with vectors opens with them, and records its configur
     const dims = 6;
     var ids: [10]NodeId = undefined;
     {
-        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false, .enable_vector = true, .vector_dimensions = dims } });
+        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false, .enable_vector = true, .vector_dimensions = dims, .new_database_id_keys = .little } });
         defer db.close();
         for (&ids, 0..) |*id, i| {
             id.* = try db.createNode(null, &.{"Doc"});

@@ -17,6 +17,7 @@ const scoped_tree = @import("scoped_tree.zig");
 const ScopedTree = scoped_tree.ScopedTree;
 const BufferPool = buffer_pool.BufferPool;
 const NodeId = lattice.core.types.NodeId;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 
 const tokenizer_mod = @import("tokenizer.zig");
 const dictionary_mod = @import("dictionary.zig");
@@ -229,7 +230,9 @@ pub const FtsIndex = struct {
     const Self = @This();
 
     /// Initialize a new FTS index
-    /// reverse_tree is optional - if provided, enables proper document deletion
+    /// reverse_tree is optional - if provided, enables proper document deletion.
+    /// `id_keys` is how the file writes document ids as keys in the lengths
+    /// and reverse trees.
     pub fn init(
         allocator: Allocator,
         bp: *BufferPool,
@@ -237,8 +240,9 @@ pub const FtsIndex = struct {
         lengths_tree: *BTree,
         reverse_tree: ?*BTree,
         config: FtsConfig,
+        id_keys: IdKeyOrder,
     ) Self {
-        return initScoped(allocator, bp, dict_tree, lengths_tree, reverse_tree, config, null);
+        return initScoped(allocator, bp, dict_tree, lengths_tree, reverse_tree, config, id_keys, null);
     }
 
     /// Initialize an index confined to one declared scope.
@@ -254,6 +258,7 @@ pub const FtsIndex = struct {
         lengths_tree: *BTree,
         reverse_tree: ?*BTree,
         config: FtsConfig,
+        id_keys: IdKeyOrder,
         scope: ?[scoped_tree.PREFIX_SIZE]u8,
     ) Self {
         const dict_view = if (scope) |p| ScopedTree.scoped(dict_tree, p) else ScopedTree.unscoped(dict_tree);
@@ -264,11 +269,12 @@ pub const FtsIndex = struct {
             .config = config,
             .dictionary = Dictionary.init(allocator, dict_view),
             .posting_store = PostingStore.init(allocator, bp),
-            .doc_lengths = DocLengthStore.init(allocator, lengths_view),
+            .doc_lengths = DocLengthStore.init(allocator, lengths_view, id_keys),
             .scorer = Bm25Scorer.init(config.bm25),
             .reverse_index = if (reverse_tree) |rt| ReverseIndex.init(
                 allocator,
                 if (scope) |p| ScopedTree.scoped(rt, p) else ScopedTree.unscoped(rt),
+                id_keys,
             ) else null,
             .dict_tree = dict_tree,
             .lengths_tree = lengths_tree,
@@ -1692,7 +1698,7 @@ test "fts index basic" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Index some documents
     const doc1_tokens = try index.indexDocument(1, "The quick brown fox jumps over the lazy dog");
@@ -1759,7 +1765,7 @@ test "fts indexDocument survives large (>=9 KiB) documents" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Build a synthetic document whose token vocabulary and total token
     // count both scale with `word_count`, so any cumulative-state bug in
@@ -1813,7 +1819,7 @@ test "fts OR query" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Index documents with distinct terms
     _ = try index.indexDocument(1, "apple banana cherry");
@@ -1863,7 +1869,7 @@ test "fts NOT query (exclusions)" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Index documents
     _ = try index.indexDocument(1, "apple banana cherry");
@@ -1920,7 +1926,7 @@ test "fts phrase query" {
     // Enable position storage for phrase queries
     var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{
         .store_positions = true,
-    });
+    }, .big);
 
     // Index documents with specific word ordering
     _ = try index.indexDocument(1, "quick brown fox"); // has "quick brown"
@@ -1978,7 +1984,7 @@ test "fts quoted phrase syntax" {
     // Enable position storage for phrase queries
     var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{
         .store_positions = true,
-    });
+    }, .big);
 
     // Index documents
     _ = try index.indexDocument(1, "quick brown fox jumps");
@@ -2044,7 +2050,7 @@ test "fts fuzzy search" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Index documents with specific terms
     _ = try index.indexDocument(1, "database systems and optimization");
@@ -2106,7 +2112,7 @@ test "fts prefix search" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{}, .big);
 
     // Index documents with terms that share prefixes
     _ = try index.indexDocument(1, "database systems");
@@ -2181,7 +2187,7 @@ const AndSearchFixture = struct {
         self.dict_tree = try BTree.init(allocator, &self.bp);
         self.lengths_tree = try BTree.init(allocator, &self.bp);
         self.reverse_tree = try BTree.init(allocator, &self.bp);
-        self.index = FtsIndex.init(allocator, &self.bp, &self.dict_tree, &self.lengths_tree, &self.reverse_tree, .{});
+        self.index = FtsIndex.init(allocator, &self.bp, &self.dict_tree, &self.lengths_tree, &self.reverse_tree, .{}, .big);
         return self;
     }
 
@@ -2446,7 +2452,7 @@ test "fts indexing that runs out of memory returns the error and frees what it t
     var fail_index: usize = 0;
     while (true) : (fail_index += 1) {
         var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
-        var index = FtsIndex.init(failing.allocator(), &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+        var index = FtsIndex.init(failing.allocator(), &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
         if (index.indexDocument(@intCast(fail_index + 1), "alpha beta gamma alpha")) |_| {
             break;
         } else |err| switch (err) {
@@ -2558,7 +2564,7 @@ test "fts a phrase on an index without positions is refused, not answered as its
     _ = try fx.index.indexDocument(2, "brown quick fox");
 
     // The record wins over a later config.
-    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
     try std.testing.expect(!try reopened.positionsStored());
     try std.testing.expectError(FtsError.PhraseNeedsPositions, reopened.search("\"quick brown\"", 10));
     try std.testing.expectError(FtsError.PhraseNeedsPositions, reopened.searchWithMode("fox -\"quick brown\"", .@"and", 10));
@@ -2572,7 +2578,7 @@ test "fts a phrase on an index without positions is refused, not answered as its
     const legacy_fx = try AndSearchFixture.create(allocator, "/tmp/lse_fts_phrase_legacy_test.db");
     defer legacy_fx.destroy(allocator);
     _ = try legacy_fx.index.indexDocumentAnalyzed(1, "quick brown", FtsIndex.legacyAnalysis(.{}), false);
-    var legacy = FtsIndex.init(allocator, &legacy_fx.bp, &legacy_fx.dict_tree, &legacy_fx.lengths_tree, &legacy_fx.reverse_tree, .{});
+    var legacy = FtsIndex.init(allocator, &legacy_fx.bp, &legacy_fx.dict_tree, &legacy_fx.lengths_tree, &legacy_fx.reverse_tree, .{}, .big);
     try std.testing.expect(!try legacy.positionsStored());
 
     // A new index stores positions by default, and phrases work.
@@ -2580,7 +2586,7 @@ test "fts a phrase on an index without positions is refused, not answered as its
     defer new_fx.destroy(allocator);
     _ = try new_fx.index.indexDocument(1, "quick brown fox");
     _ = try new_fx.index.indexDocument(2, "brown quick fox");
-    var again = FtsIndex.init(allocator, &new_fx.bp, &new_fx.dict_tree, &new_fx.lengths_tree, &new_fx.reverse_tree, .{ .store_positions = false });
+    var again = FtsIndex.init(allocator, &new_fx.bp, &new_fx.dict_tree, &new_fx.lengths_tree, &new_fx.reverse_tree, .{ .store_positions = false }, .big);
     try std.testing.expect(try again.positionsStored());
     const phrase = try again.search("\"quick brown\"", 10);
     defer again.freeResults(phrase);
@@ -2887,8 +2893,8 @@ test "fts batched scoring and bounded ranking match a full scan and sort" {
 
     // Two scoped indexes over the same trees with the same doc ids, so a
     // lookup that strayed out of its scope would read the other's lengths.
-    var a = FtsIndex.initScoped(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .{ 0, 1, 0, 1 });
-    var b = FtsIndex.initScoped(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .{ 0, 1, 0, 2 });
+    var a = FtsIndex.initScoped(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big, .{ 0, 1, 0, 1 });
+    var b = FtsIndex.initScoped(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big, .{ 0, 1, 0, 2 });
 
     var prng = std.Random.DefaultPrng.init(7);
     const rnd = prng.random();
@@ -2977,7 +2983,7 @@ test "fts an index 0.16.0 built keeps its ASCII tokenizer until it is emptied" {
     _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy, false);
 
     // Reopened by this version.
-    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
     try std.testing.expect((try reopened.analysis()).ascii_only);
     // Its stored terms are still found, by the same queries as before.
     {
@@ -2998,7 +3004,7 @@ test "fts an index 0.16.0 built keeps its ASCII tokenizer until it is emptied" {
     for ([_]DocId{ 1, 2, 3 }) |doc| try reopened.removeDocument(doc);
     _ = try reopened.indexDocument(4, "Herr Müller");
     _ = try reopened.indexDocument(5, "Frau Zöller");
-    var again = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    var again = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
     try std.testing.expect(!(try again.analysis()).ascii_only);
     const got = try again.search("Müller", 10);
     defer again.freeResults(got);
@@ -3013,12 +3019,12 @@ test "fts the recorded analysis wins over a changed config" {
 
     var stemming = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{
         .tokenizer = .{ .use_stemming = true },
-    });
+    }, .big);
     _ = try stemming.indexDocument(1, "she runs daily");
 
     // Opened with stemming off: the stored term is "run", and the query must
     // still be stemmed to find it.
-    var plain = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    var plain = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
     try std.testing.expect((try plain.analysis()).use_stemming);
     const got = try plain.search("running", 10);
     defer plain.freeResults(got);
@@ -3065,13 +3071,13 @@ test "fts an index with documents but no stored stats is not taken for empty" {
     _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy, false);
     try fx.lengths_tree.delete(&[_]u8{ 0x00, 's', 't', 'a', 't', 's' });
 
-    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
     try std.testing.expectEqual(@as(u64, 0), reopened.doc_lengths.stats.total_docs);
     try std.testing.expect((try reopened.analysis()).ascii_only);
     // A new document is written the way the stored ones were, not recorded
     // as a fresh index over terms it cannot read.
     _ = try reopened.indexDocument(3, "Herr Müller");
-    var again = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    var again = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
     try std.testing.expect((try again.analysis()).ascii_only);
     const got = try again.search("ller", 10);
     defer again.freeResults(got);
@@ -3094,7 +3100,7 @@ test "fts dictionary entries keep their counts, their tail and the term count ac
     try std.testing.expect(entry.tail_page != 0 and entry.tail_page != entry.posting_page);
 
     // The term count no longer restarts when the index is opened again.
-    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .big);
     try std.testing.expectEqual(@as(u64, 3), (try reopened.getStats()).unique_tokens);
 
     // 0.16.0 rewrites an entry it updates with no tail and a counter id;

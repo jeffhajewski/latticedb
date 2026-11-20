@@ -86,11 +86,12 @@ fn writeReaderReasons(writer: anytype, reasons: u16, separator: []const u8, quot
     }
 }
 
-/// The table line for the reader version: why 0.16.0 is refused, when it is.
+/// The table line for the reader version: which older releases are refused,
+/// and why, when any are.
 fn writeReaderVersionLine(writer: anytype, label: []const u8, version: u16, reasons: u16) !void {
     try writer.print("{s}v{d}", .{ label, version });
     if (version > lattice.core.types.MIN_READER_VERSION) {
-        try writer.writeAll(", so 0.16.0 cannot open it (");
+        try writer.print(", so {s} cannot open it (", .{refusedReleases(version)});
         if (reasons == 0) {
             try writer.writeAll("reason not recorded");
         } else {
@@ -99,6 +100,20 @@ fn writeReaderVersionLine(writer: anytype, label: []const u8, version: u16, reas
         try writer.writeAll(")");
     }
     try writer.writeAll("\n");
+}
+
+/// The releases a file with `min_reader_version` `version` (above 3) shuts
+/// out. Format 4 began with 0.17.0, format 5 after 0.18.
+fn refusedReleases(version: u16) []const u8 {
+    return if (version >= lattice.core.types.ORDERED_ID_KEYS_READER_VERSION) "0.18 and earlier" else "0.16.0";
+}
+
+/// What `lattice info` says about the file's id keys.
+fn idKeysDescription(order: lattice.core.id_key.IdKeyOrder) []const u8 {
+    return switch (order) {
+        .big => "big-endian (format 5: scans return ascending ids)",
+        .little => "little-endian (created before format 5)",
+    };
 }
 
 fn failCommand(stderr: anytype, comptime fmt: []const u8, args: anytype) CliError {
@@ -385,6 +400,10 @@ fn cmdInfo(
     const file_header = db.page_manager.getHeader();
     const reader_version = file_header.min_reader_version;
     const reader_reasons = file_header.readerReasons();
+    // The file's own format, as the header records it: info opens read-only
+    // and so does not upgrade it. Id keys are fixed when a file is created.
+    const file_format = file_header.format_version;
+    const id_keys = file_header.idKeyOrder();
 
     switch (parsed_args.format) {
         .table => {
@@ -393,7 +412,8 @@ fn cmdInfo(
             try stdout.print("Size:         {d} KB\n", .{size_kb});
             try stdout.print("Nodes:        {d}\n", .{node_count});
             try stdout.print("Edges:        {d}\n", .{edge_count});
-            try stdout.print("Format:       v{d}\n", .{lattice.core.types.FORMAT_VERSION});
+            try stdout.print("Format:       v{d}\n", .{file_format});
+            try stdout.print("Id keys:      {s}\n", .{idKeysDescription(id_keys)});
             try writeReaderVersionLine(stdout, "Min reader:   ", reader_version, reader_reasons);
             try stdout.print("Vector:       {s}\n", .{if (db.hasPersistedVectorIndex()) "enabled" else "disabled"});
             if (vector_config) |config| {
@@ -419,12 +439,13 @@ fn cmdInfo(
             }
         },
         .json => {
-            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"vector_enabled\":{},", .{
+            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"id_keys\":\"{s}\",\"vector_enabled\":{},", .{
                 path,
                 size_kb,
                 node_count,
                 edge_count,
-                lattice.core.types.FORMAT_VERSION,
+                file_format,
+                id_keys.name(),
                 db.hasPersistedVectorIndex(),
             });
             try stdout.print("\"min_reader_version\":{d},\"min_reader_reasons\":[", .{reader_version});
@@ -461,7 +482,8 @@ fn cmdInfo(
             try stdout.print("size_kb,{d}\n", .{size_kb});
             try stdout.print("nodes,{d}\n", .{node_count});
             try stdout.print("edges,{d}\n", .{edge_count});
-            try stdout.print("format_version,{d}\n", .{lattice.core.types.FORMAT_VERSION});
+            try stdout.print("format_version,{d}\n", .{file_format});
+            try stdout.print("id_keys,{s}\n", .{id_keys.name()});
             try stdout.print("min_reader_version,{d}\nmin_reader_reasons,", .{reader_version});
             try writeReaderReasons(stdout, reader_reasons, ";", false);
             try stdout.writeAll("\n");
@@ -997,8 +1019,8 @@ fn reportReplicationPass(
             "{{\"path\":\"{s}\",\"destination\":\"{s}\",\"generation\":{d},\"started_generation\":{}," ++
                 "\"frames_shipped\":{d},\"bytes_shipped\":{d},\"snapshot_bytes\":{d},\"duration_ns\":{d}}}\n",
             .{
-                path,          dest,
-                stats.generation, stats.started_generation,
+                path,                 dest,
+                stats.generation,     stats.started_generation,
                 stats.frames_shipped, stats.bytes_shipped,
                 stats.snapshot_bytes, stats.duration_ns,
             },
@@ -1006,8 +1028,8 @@ fn reportReplicationPass(
         .csv => try stdout.print(
             "{s},{s},{d},{},{d},{d},{d},{d}\n",
             .{
-                path,          dest,
-                stats.generation, stats.started_generation,
+                path,                 dest,
+                stats.generation,     stats.started_generation,
                 stats.frames_shipped, stats.bytes_shipped,
                 stats.snapshot_bytes, stats.duration_ns,
             },

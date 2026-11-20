@@ -23,6 +23,7 @@ const PageType = page.PageType;
 const PageHeader = page.PageHeader;
 const FileFlags = page.FileFlags;
 const FileHeader = page.FileHeader;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 const calculateChecksum = page.calculateChecksum;
 
 const MAGIC_NUMBER = types.MAGIC_NUMBER;
@@ -71,6 +72,9 @@ pub const OpenOptions = struct {
     /// than for arranging concurrent access, which this engine cannot do across
     /// processes however the lock is set.
     lock: bool = true,
+    /// The byte order of id keys in a file this open creates (see
+    /// `id_key.zig`). An existing file keeps the order it was created with.
+    new_file_id_keys: IdKeyOrder = .big,
 };
 
 pub const TruncateStats = struct {
@@ -183,7 +187,7 @@ pub const PageManager = struct {
             if (options.read_only) {
                 return PageManagerError.InvalidHeader;
             }
-            try self.initNewFile();
+            try self.initNewFile(options.new_file_id_keys);
         } else if (file_size >= DEFAULT_PAGE_SIZE) {
             try self.loadHeader();
         } else {
@@ -207,8 +211,8 @@ pub const PageManager = struct {
     }
 
     /// Initialize a new database file.
-    fn initNewFile(self: *Self) PageManagerError!void {
-        self.header = FileHeader.init();
+    fn initNewFile(self: *Self, id_keys: IdKeyOrder) PageManagerError!void {
+        self.header = FileHeader.init(id_keys);
         self.header.page_size = self.page_size;
         self.header.created_timestamp = @intCast(@import("compat").timestamp());
         self.header.modified_timestamp = self.header.created_timestamp;
@@ -281,9 +285,12 @@ pub const PageManager = struct {
             self.header_dirty = true;
         }
 
-        // Upgrading the version does not lock 0.16.0 out: what format 4 adds
-        // it can ignore, so the minimum reader stays where it was unless the
-        // file holds something it would misread (see FileHeader).
+        // Upgrading the version locks no older reader out: what formats 4
+        // and 5 add to a file created before them it can ignore, so the
+        // minimum reader stays where it was unless the file holds something
+        // that reader would misread (see FileHeader.ReaderReason). Format 5's
+        // id key order is fixed when a file is created, so a file created
+        // before it keeps little-endian keys and its format-4 readers.
         if (!self.read_only and self.header.format_version < FORMAT_VERSION) {
             self.header.format_version = FORMAT_VERSION;
             self.header.min_reader_version = @max(self.header.min_reader_version, types.MIN_READER_VERSION);
@@ -693,15 +700,15 @@ pub const PageManager = struct {
         return true;
     }
 
-    /// Keep 0.16.0 from opening the file: it now holds `reason` (a
-    /// `FileHeader.ReaderReason` bit), something 0.16.0 would misread or
-    /// damage. Reaches the file with the next flush; never lowered.
+    /// Keep the releases that would misread or damage `reason` (a
+    /// `FileHeader.ReaderReason` bit) from opening the file, now that it
+    /// holds it. Reaches the file with the next flush; never lowered.
     pub fn requireReaderVersion(self: *Self, reason: u16) PageManagerError!void {
         if (self.read_only) return PageManagerError.PermissionDenied;
         self.raiseMinReaderVersion(reason);
     }
 
-    /// Require a reader of this release's format for `reason` (a
+    /// Require a reader that understands `reason` (a
     /// `FileHeader.ReaderReason` bit), durably before this returns.
     ///
     /// For something about to be written that an older release would
@@ -716,7 +723,7 @@ pub const PageManager = struct {
     /// flush.
     pub fn raiseMinReaderVersionNow(self: *Self, reason: u16) PageManagerError!void {
         if (self.read_only) return PageManagerError.PermissionDenied;
-        if (self.header.min_reader_version >= types.FORMAT_VERSION) {
+        if (self.header.min_reader_version >= FileHeader.ReaderReason.version(reason)) {
             if (self.header.readerReasons() & reason != reason) {
                 self.header.raiseMinReader(reason);
                 self.header_dirty = true;
@@ -738,13 +745,12 @@ pub const PageManager = struct {
         self.file.sync() catch return PageManagerError.IoError;
     }
 
-    /// Require a reader of this release's format for `reason` in the header
-    /// the next flush writes. For a replay, whose flushes carry the header
-    /// with the pages.
+    /// Require a reader that understands `reason` in the header the next
+    /// flush writes. For a replay, whose flushes carry the header with the
+    /// pages.
     pub fn raiseMinReaderVersion(self: *Self, reason: u16) void {
         if (self.read_only) return;
-        if (self.header.min_reader_version >= types.FORMAT_VERSION and
-            self.header.readerReasons() & reason == reason) return;
+        if (self.header.requiresReaderFor(reason)) return;
         self.header.raiseMinReader(reason);
         self.header_dirty = true;
     }

@@ -33,6 +33,7 @@ const lcf_c_api_changefeed_test = @import("lcf_c_api_changefeed_test.zig");
 test {
     // Core types
     _ = lattice.core.types;
+    _ = lattice.core.id_key;
 
     // Storage - inline tests
     _ = lattice.storage.page;

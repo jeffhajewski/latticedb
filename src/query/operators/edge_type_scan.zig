@@ -35,7 +35,8 @@ const SymbolId = symbols.SymbolId;
 ///
 /// It returns what expanding every node would: an edge whose start node no
 /// longer exists is left out, as the node scan never offered it. Rows come
-/// in the order of the edge id index, which is not id order.
+/// in the order of the edge id index: ascending edge id in a format-5 file,
+/// a stable order that is not id order in a file created earlier.
 ///
 /// A query that only reads streams the index `CHUNK` edges at a time; one
 /// that writes takes them all when it opens, so that its own writes cannot

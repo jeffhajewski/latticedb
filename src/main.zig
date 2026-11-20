@@ -8,6 +8,7 @@ const std = @import("std");
 // Core modules
 pub const core = struct {
     pub const types = @import("core/types.zig");
+    pub const id_key = @import("core/id_key.zig");
 };
 
 // Storage modules

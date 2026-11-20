@@ -264,7 +264,7 @@ fn expectTreeMatches(index: *HnswIndex, vs: *VectorStorage, tree: *helpers.BTree
         defer it.deinit();
         while (try it.next()) |e| {
             if (std.mem.eql(u8, e.key, &([_]u8{0xFF} ** 8))) continue;
-            const id = std.mem.readInt(u64, e.key[0..8], .little);
+            const id = lattice.core.id_key.IdKeyOrder.big.decode(e.key[0..8]);
             const entry = index.getNode(id) orelse return error.StaleTreeEntry;
             var buf: [hnsw_mod.HnswNodeEntry.SERIALIZED_SIZE]u8 = undefined;
             entry.serialize(&buf);
@@ -276,7 +276,7 @@ fn expectTreeMatches(index: *HnswIndex, vs: *VectorStorage, tree: *helpers.BTree
 
     var loaded = HnswIndex.init(allocator, db.bp, vs, index.config);
     defer loaded.deinit();
-    try std.testing.expect(try loaded.loadFromTree(tree));
+    try std.testing.expect(try loaded.loadFromTree(tree, .big));
     var a = try GraphSnapshot.take(allocator, index);
     defer a.deinit();
     var b = try GraphSnapshot.take(allocator, &loaded);
@@ -308,7 +308,7 @@ test "incremental hnsw saves keep the tree equal to the node map" {
         const v = randomVector(random);
         try index.insert(id, &v);
     }
-    try index.saveToTree(&tree);
+    try index.saveToTree(&tree, .big);
     try expectTreeMatches(&index, &vs, &tree, &db);
 
     for (0..30) |round| {
@@ -330,7 +330,7 @@ test "incremental hnsw saves keep the tree equal to the node map" {
             if (index.insert(500 + round, &v)) |_| {} else |_| {}
             failing.fail_index = std.math.maxInt(usize);
         }
-        try index.saveToTree(&tree);
+        try index.saveToTree(&tree, .big);
         try expectTreeMatches(&index, &vs, &tree, &db);
     }
 
@@ -340,7 +340,7 @@ test "incremental hnsw saves keep the tree equal to the node map" {
         const v = randomVector(random);
         try index.insert(id, &v);
     }
-    try index.saveToTree(&tree);
+    try index.saveToTree(&tree, .big);
     try expectTreeMatches(&index, &vs, &tree, &db);
 }
 
@@ -430,7 +430,7 @@ test "hnsw recall holds up under delete and re-insert churn" {
             try index.insert(id, v);
             live.* = true;
         }
-        try index.saveToTree(&tree);
+        try index.saveToTree(&tree, .big);
     }
 
     // Compare with an index built from scratch over the same live vectors,

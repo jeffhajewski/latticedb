@@ -6,6 +6,9 @@
 //! header still says 3. Recovery by this release shows whatever the disk
 //! holds durably (in the log or in the file); the header is read raw, before
 //! recovery touches it.
+//!
+//! Only a file with little-endian id keys starts at 3, so that is what these
+//! tests create; a format-5 file requires a format-5 reader from creation.
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -21,7 +24,7 @@ const DB_PATH = "db";
 fn open(allocator: std.mem.Allocator, fs: *FaultVfs, create: bool, enable_wal: bool) !*Database {
     return Database.openWithVfs(allocator, DB_PATH, .{
         .create = create,
-        .config = .{ .enable_wal = enable_wal, .enable_fts = false, .enable_vector = false, .enable_query_cache = false },
+        .config = .{ .enable_wal = enable_wal, .enable_fts = false, .enable_vector = false, .enable_query_cache = false, .new_database_id_keys = .little },
     }, fs.vfs());
 }
 
@@ -79,13 +82,13 @@ fn runGateCrash(enable_wal: bool) !void {
 
                 if (batch.records.len > 0) {
                     with_events += 1;
-                    if (version < types.FORMAT_VERSION) {
+                    if (version < types.REASONS_READER_VERSION) {
                         std.debug.print("cut {d}/{d} {s} seed {d}: {d} events durable, header still says {d}\n", .{
                             cut, trace.len, @tagName(style), seed, batch.records.len, version,
                         });
                         return error.TestUnexpectedResult;
                     }
-                } else if (version < types.FORMAT_VERSION) {
+                } else if (version < types.REASONS_READER_VERSION) {
                     before_raise += 1;
                 }
             }

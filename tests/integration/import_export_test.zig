@@ -65,15 +65,13 @@ fn cleanupTestDb(db: *Database, path: []const u8) void {
 }
 
 fn overwriteNodePayloadWithInvalidData(db: *Database, node_id: u64) !void {
-    var key: [database_key_size]u8 = undefined;
-    std.mem.writeInt(u64, &key, node_id, .little);
+    const key: [database_key_size]u8 = db.id_key_order.encode(node_id);
     try db.node_tree.delete(&key);
     try db.node_tree.insert(&key, invalid_payload);
 }
 
 fn overwriteEdgePayloadWithInvalidData(db: *Database, edge_id: u64) !void {
-    var key: [database_key_size]u8 = undefined;
-    std.mem.writeInt(u64, &key, edge_id, .little);
+    const key: [database_key_size]u8 = db.id_key_order.encode(edge_id);
     try db.edge_store.edge_id_index.delete(&key);
     try db.edge_store.edge_id_index.insert(&key, invalid_payload);
 }

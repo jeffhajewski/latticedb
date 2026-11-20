@@ -16,8 +16,7 @@ const SymbolId = lattice.graph.symbols.SymbolId;
 const NodeProperty = lattice.graph.node.Property;
 
 fn overwriteEdgePayloadWithInvalidData(db: *Database, edge_id: u64) !void {
-    var id_key: [8]u8 = undefined;
-    std.mem.writeInt(u64, &id_key, edge_id, .little);
+    const id_key = db.id_key_order.encode(edge_id);
     try db.edge_store.edge_id_index.delete(&id_key);
     try db.edge_store.edge_id_index.insert(&id_key, "bad");
 }

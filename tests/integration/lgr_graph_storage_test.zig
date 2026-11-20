@@ -213,8 +213,7 @@ test "lgr: an edge record with an unknown value tag is refused, not read as null
     std.mem.writeInt(u16, record[18..20], 1, .little);
     std.mem.writeInt(u16, record[20..22], key_id, .little);
     record[22] = 0x2a;
-    var id_key: [8]u8 = undefined;
-    std.mem.writeInt(u64, &id_key, edge_id, .little);
+    const id_key = db.id_key_order.encode(edge_id);
     try db.edge_store.edge_id_index.replace(&id_key, &record);
 
     try std.testing.expectError(lattice.graph.edge.EdgeError.InvalidData, db.edge_store.getById(edge_id));
@@ -649,7 +648,13 @@ test "lgr: an ordered index raises the minimum reader version, an old index keep
     const path = "/tmp/lgr_index_versions.ltdb";
     defer removeFiles(path);
     {
-        var db = try openDb(path, true);
+        // Little-endian id keys, as 0.16.0 wrote: only there is the reader
+        // version still 3 for the raise to show.
+        removeFiles(path);
+        var db = try Database.open(std.testing.allocator, path, .{
+            .create = true,
+            .config = .{ .enable_fts = false, .enable_vector = false, .new_database_id_keys = .little },
+        });
         defer db.close();
         try std.testing.expectEqual(lattice.core.types.MIN_READER_VERSION, db.page_manager.getHeader().min_reader_version);
         var txn = try db.beginTransaction(.read_write);
@@ -690,13 +695,14 @@ test "lgr: an ordered index raises the minimum reader version, an old index keep
         try std.testing.expectEqual(@as(i64, 10), result.rows[0].values[0].int_val);
 
         try db.createNodePropertyIndex("P", "v");
-        try std.testing.expectEqual(lattice.core.types.FORMAT_VERSION, db.page_manager.getHeader().min_reader_version);
+        // Format 4 reads ordered indexes, so that is what the file needs.
+        try std.testing.expectEqual(lattice.core.types.REASONS_READER_VERSION, db.page_manager.getHeader().min_reader_version);
         try std.testing.expectEqual(Reason.changefeed_events | Reason.ordered_property_index, db.page_manager.getHeader().readerReasons());
     }
     {
         var db = try reopenDb(path);
         defer db.close();
-        try std.testing.expectEqual(lattice.core.types.FORMAT_VERSION, db.page_manager.getHeader().min_reader_version);
+        try std.testing.expectEqual(lattice.core.types.REASONS_READER_VERSION, db.page_manager.getHeader().min_reader_version);
         var result = try db.query("MATCH (n:P) WHERE n.v >= 25 RETURN count(n)");
         defer result.deinit();
         try std.testing.expectEqual(@as(i64, 5), result.rows[0].values[0].int_val);

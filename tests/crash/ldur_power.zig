@@ -61,6 +61,9 @@ pub const Options = struct {
     /// reach the file only when the pages are flushed, and a cut may lose
     /// any of them since the last `sync()` or close, but never part of one.
     no_log: bool = false,
+    /// Create the database with little-endian id keys, as files from before
+    /// format 5 have them, instead of this release's big-endian ones.
+    legacy_id_keys: bool = false,
     /// Cuts at random points, besides the ones at each sync.
     random_cuts: usize = 60,
     /// Every this many cuts, also cut the power during the recovery.
@@ -251,11 +254,18 @@ fn dbConfig(options: Options) DatabaseConfig {
         .auto_checkpoint = .{ .max_wal_frames = options.max_wal_frames },
         .sync_mode = options.sync_mode,
         .enable_query_cache = false,
+        .new_database_id_keys = if (options.legacy_id_keys) .little else .big,
     };
 }
 
 fn openDb(allocator: Allocator, fs: *FaultVfs, options: Options, create: bool, seed: u64) !*Database {
     const db = try Database.openWithVfs(allocator, DB_PATH, .{ .create = create, .config = dbConfig(options) }, fs.vfs());
+    // The layout is the file's, from creation, through every crash.
+    const expected: lattice.core.id_key.IdKeyOrder = if (options.legacy_id_keys) .little else .big;
+    if (db.id_key_order != expected) {
+        db.close();
+        return error.Invariant;
+    }
     // The vector index picks levels at random, seeded from the clock. Seed
     // it from the run so that a run can be repeated.
     if (db.hnsw_index) |*hnsw| hnsw.rng = std.Random.DefaultPrng.init(seed);

@@ -6,6 +6,7 @@ const std = @import("std");
 const lattice = @import("lattice");
 
 const types = lattice.core.types;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 
 pub const PageId = types.PageId;
 pub const DEFAULT_PAGE_SIZE = types.DEFAULT_PAGE_SIZE;
@@ -128,14 +129,19 @@ pub const FileHeader = extern struct {
     /// to raise `min_reader_version` instead.
     min_writer_version: u16,
     /// Why `min_reader_version` was raised above `MIN_READER_VERSION`: the
-    /// `ReaderReason` bits of what the file holds that a format-3 reader
-    /// (0.16.0) would misread. Informational; the version alone decides.
+    /// `ReaderReason` bits of what the file holds that an older reader would
+    /// misread. Informational; the version alone decides.
     min_reader_reasons: u16,
     reserved3: [6]u8,
 
-    /// What can raise `min_reader_version` to FORMAT_VERSION, as bits of
-    /// `min_reader_reasons`. Each is something 0.16.0 would read wrongly
-    /// rather than refuse.
+    /// What can raise `min_reader_version`, as bits of `min_reader_reasons`.
+    /// Each is something an older release would read wrongly rather than
+    /// refuse, and each requires the reader version given in `all`: the
+    /// first four came with format 4 and lock out only 0.16.0; ordered id
+    /// keys came with format 5 and lock out every format-4 release too. A
+    /// reason requires the format that introduced it, never "the current
+    /// one", so a later format does not lock older readers out of a file
+    /// that holds nothing new.
     pub const ReaderReason = struct {
         /// A vector index whose metric or connection count 0.16.0 would take
         /// for cosine with m = 16.
@@ -148,13 +154,28 @@ pub const FileHeader = extern struct {
         /// A full-text index that stores word positions: 0.16.0 appends to
         /// its posting pages without a position count and garbles them.
         pub const fulltext_positions: u16 = 0x08;
+        /// Big-endian id keys (`FileFlags.ORDERED_ID_KEYS`): a format-4
+        /// release would decode every node, edge and document id wrongly.
+        /// Set when the file is created, never later.
+        pub const ordered_id_keys: u16 = 0x10;
 
-        pub const all = [_]struct { bit: u16, name: []const u8 }{
-            .{ .bit = vector_index, .name = "vector index settings" },
-            .{ .bit = ordered_property_index, .name = "ordered property index" },
-            .{ .bit = changefeed_events, .name = "changefeed events" },
-            .{ .bit = fulltext_positions, .name = "full-text positions" },
+        pub const all = [_]struct { bit: u16, name: []const u8, version: u16 }{
+            .{ .bit = vector_index, .name = "vector index settings", .version = types.REASONS_READER_VERSION },
+            .{ .bit = ordered_property_index, .name = "ordered property index", .version = types.REASONS_READER_VERSION },
+            .{ .bit = changefeed_events, .name = "changefeed events", .version = types.REASONS_READER_VERSION },
+            .{ .bit = fulltext_positions, .name = "full-text positions", .version = types.REASONS_READER_VERSION },
+            .{ .bit = ordered_id_keys, .name = "ordered id keys", .version = types.ORDERED_ID_KEYS_READER_VERSION },
         };
+
+        /// The reader version `reasons` (one bit or several) require: the
+        /// highest any of them needs, or `MIN_READER_VERSION` for none.
+        pub fn version(reasons: u16) u16 {
+            var needed = types.MIN_READER_VERSION;
+            for (all) |reason| {
+                if (reasons & reason.bit != 0) needed = @max(needed, reason.version);
+            }
+            return needed;
+        }
     };
 
     /// Marks the format-4 fields as written by a release that keeps them.
@@ -279,12 +300,29 @@ pub const FileHeader = extern struct {
         if (!config.legacyReadable()) self.raiseMinReader(ReaderReason.vector_index);
     }
 
-    /// Require a reader of this release's format, because the file holds
-    /// `reason` (a `ReaderReason` bit). Never lowers the version.
+    /// Require a reader that understands `reason` (a `ReaderReason` bit),
+    /// because the file holds it: at least `ReaderReason.version(reason)`.
+    /// Never lowers the version.
     pub fn raiseMinReader(self: *FileHeader, reason: u16) void {
         if (!self.hasExtension()) self.resetExtension();
-        if (self.min_reader_version < types.FORMAT_VERSION) self.min_reader_version = types.FORMAT_VERSION;
+        const needed = ReaderReason.version(reason);
+        if (self.min_reader_version < needed) self.min_reader_version = needed;
         self.min_reader_reasons |= reason;
+    }
+
+    /// Whether the header already requires what `reason` needs and records it.
+    pub fn requiresReaderFor(self: *const FileHeader, reason: u16) bool {
+        return self.min_reader_version >= ReaderReason.version(reason) and
+            self.readerReasons() & reason == reason;
+    }
+
+    /// The byte order of the file's id keys. Decided when the file was
+    /// created and never changed. The flag lives in `flags`, which every
+    /// release keeps when it writes the header, and a file with it requires
+    /// a format-5 reader, so no release that would drop or ignore it can
+    /// write the file.
+    pub fn idKeyOrder(self: *const FileHeader) IdKeyOrder {
+        return if (self.flags & FileFlags.ORDERED_ID_KEYS != 0) .big else .little;
     }
 
     /// The recorded reasons for `min_reader_version`, 0 when none are.
@@ -292,7 +330,21 @@ pub const FileHeader = extern struct {
         return if (self.hasExtension()) self.min_reader_reasons else 0;
     }
 
-    pub fn init() FileHeader {
+    /// A header for a new file whose id keys are in `id_keys` order. A
+    /// file with big-endian keys requires a format-5 reader from the start;
+    /// one with little-endian keys is laid out as format 4 lays a file out
+    /// and opens in 0.16.0 and later until it holds something they would
+    /// misread.
+    pub fn init(id_keys: IdKeyOrder) FileHeader {
+        var header = initLegacyKeys();
+        if (id_keys == .big) {
+            header.flags |= FileFlags.ORDERED_ID_KEYS;
+            header.raiseMinReader(ReaderReason.ordered_id_keys);
+        }
+        return header;
+    }
+
+    fn initLegacyKeys() FileHeader {
         return .{
             .magic = types.MAGIC_NUMBER,
             .format_version = types.FORMAT_VERSION,
@@ -358,6 +410,12 @@ pub const FileFlags = struct {
     /// where 0.16.0 wrote them as zeros); meaningful only with the format-4
     /// header fields present (`FileHeader.pagesSealed`).
     pub const SEALED_PAGES: u32 = 0x20;
+    /// Ids are written as big-endian B-tree keys in the node tree, the edge
+    /// id index, the full-text document trees and the vector index's node
+    /// tree, so key order is id order (format 5; see `id_key.zig`). Set when
+    /// the file is created and never changed. Without it those keys are
+    /// little-endian, as every file before format 5 has them.
+    pub const ORDERED_ID_KEYS: u32 = 0x40;
 };
 
 /// Calculate CRC32C checksum (Castagnoli polynomial).
@@ -414,7 +472,7 @@ test "file header keeps 0.16.0's layout and puts the format-4 fields after it" {
 }
 
 test "format-4 header fields read as absent once an older release zeroes them" {
-    var header = FileHeader.init();
+    var header = FileHeader.init(.little);
     header.next_node_id = 42;
     header.setVectorConfig(FileHeader.VectorConfig.legacy(8));
     try std.testing.expectEqual(@as(?u64, 42), header.storedNextNodeId());
@@ -429,16 +487,18 @@ test "format-4 header fields read as absent once an older release zeroes them" {
 }
 
 test "a vector configuration 0.16.0 would misread raises min_reader_version" {
-    var header = FileHeader.init();
+    var header = FileHeader.init(.little);
     header.setVectorConfig(.{ .dimensions = 4, .metric = .dot_product, .m = 16, .m_max0 = 32, .ef_construction = 200 });
-    try std.testing.expectEqual(types.FORMAT_VERSION, header.min_reader_version);
+    // Format 4 reads such an index, so it is what the file requires, not
+    // this release's format.
+    try std.testing.expectEqual(types.REASONS_READER_VERSION, header.min_reader_version);
     try std.testing.expectEqual(FileHeader.ReaderReason.vector_index, header.readerReasons());
 
-    var other = FileHeader.init();
+    var other = FileHeader.init(.little);
     other.setVectorConfig(.{ .dimensions = 4, .metric = .cosine, .m = 24, .m_max0 = 48, .ef_construction = 100 });
-    try std.testing.expectEqual(types.FORMAT_VERSION, other.min_reader_version);
+    try std.testing.expectEqual(types.REASONS_READER_VERSION, other.min_reader_version);
 
-    var tuned = FileHeader.init();
+    var tuned = FileHeader.init(.little);
     tuned.setVectorConfig(.{ .dimensions = 4, .metric = .cosine, .m = 16, .m_max0 = 32, .ef_construction = 64 });
     try std.testing.expectEqual(types.MIN_READER_VERSION, tuned.min_reader_version);
     try std.testing.expectEqual(@as(u16, 0), tuned.readerReasons());
@@ -455,10 +515,44 @@ test "page type values" {
 }
 
 test "min_writer_version is the current format in a new header and no restriction once zeroed" {
-    var header = FileHeader.init();
+    var header = FileHeader.init(.little);
     try std.testing.expectEqual(types.FORMAT_VERSION, header.min_writer_version);
     header.resetExtension();
     try std.testing.expectEqual(@as(u16, 0), header.min_writer_version);
     const bytes = std.mem.asBytes(&header);
     try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bytes[222..224], .little));
+}
+
+test "a header with ordered id keys requires a format-5 reader from the start" {
+    const header = FileHeader.init(.big);
+    try std.testing.expect(header.flags & FileFlags.ORDERED_ID_KEYS != 0);
+    try std.testing.expectEqual(IdKeyOrder.big, header.idKeyOrder());
+    try std.testing.expectEqual(types.ORDERED_ID_KEYS_READER_VERSION, header.min_reader_version);
+    try std.testing.expectEqual(FileHeader.ReaderReason.ordered_id_keys, header.readerReasons());
+    try std.testing.expectEqual(types.FORMAT_VERSION, header.format_version);
+
+    // Something format 4 introduced does not lower it, and is recorded too.
+    var raised = header;
+    raised.raiseMinReader(FileHeader.ReaderReason.changefeed_events);
+    try std.testing.expectEqual(types.ORDERED_ID_KEYS_READER_VERSION, raised.min_reader_version);
+    try std.testing.expectEqual(FileHeader.ReaderReason.ordered_id_keys | FileHeader.ReaderReason.changefeed_events, raised.readerReasons());
+}
+
+test "a header with little-endian id keys never asks for more than format 4" {
+    var header = FileHeader.init(.little);
+    try std.testing.expectEqual(IdKeyOrder.little, header.idKeyOrder());
+    try std.testing.expectEqual(types.MIN_READER_VERSION, header.min_reader_version);
+    try std.testing.expectEqual(types.FORMAT_VERSION, header.format_version);
+    inline for (.{
+        FileHeader.ReaderReason.vector_index,
+        FileHeader.ReaderReason.ordered_property_index,
+        FileHeader.ReaderReason.changefeed_events,
+        FileHeader.ReaderReason.fulltext_positions,
+    }) |reason| {
+        try std.testing.expectEqual(types.REASONS_READER_VERSION, FileHeader.ReaderReason.version(reason));
+        header.raiseMinReader(reason);
+        try std.testing.expect(header.requiresReaderFor(reason));
+    }
+    try std.testing.expectEqual(types.REASONS_READER_VERSION, header.min_reader_version);
+    try std.testing.expectEqual(@as(u16, types.MIN_READER_VERSION), FileHeader.ReaderReason.version(0));
 }

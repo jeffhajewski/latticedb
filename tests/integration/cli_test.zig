@@ -478,9 +478,16 @@ test "cli: info and check say when and why 0.16.0 cannot open a database" {
     deleteDatabaseFiles(path);
     defer deleteDatabaseFiles(path);
 
-    const created = try runCli(allocator, &.{ "create", path });
-    defer created.deinit(allocator);
-    try std.testing.expect(created.succeeded());
+    // A file laid out as 0.17 and 0.18 lay one out, little-endian id keys:
+    // only there does the reader version start at 3. The CLI creates
+    // format-5 files.
+    {
+        const db = try lattice.storage.database.Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .new_database_id_keys = .little },
+        });
+        db.close();
+    }
     for ([_][]const u8{ "info", "check" }) |command| {
         const run = try runCli(allocator, &.{ command, path, "--format=json" });
         defer run.deinit(allocator);
@@ -490,7 +497,8 @@ test "cli: info and check say when and why 0.16.0 cannot open a database" {
         }
     }
 
-    // The first change records changefeed events.
+    // The first change records changefeed events, which need format 4, not
+    // this release's format: 0.17 and 0.18 can still open the file.
     const wrote = try runCli(allocator, &.{ "exec", path, "--query=CREATE (:Person {name: 'Ada'})" });
     defer wrote.deinit(allocator);
     try std.testing.expect(wrote.succeeded());
@@ -506,6 +514,54 @@ test "cli: info and check say when and why 0.16.0 cannot open a database" {
             std.debug.print("{s}: exit {?d}\njson: {s}\ntable: {s}\n", .{ command, json.exit_code, json.stdout, table.stdout });
             return error.TestUnexpectedResult;
         }
+    }
+    const info = try runCli(allocator, &.{ "info", path, "--format=json" });
+    defer info.deinit(allocator);
+    if (std.mem.indexOf(u8, info.stdout, "\"format_version\":5,\"id_keys\":\"little-endian\"") == null) {
+        std.debug.print("info: {s}\n", .{info.stdout});
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "cli: info and check say a format-5 file is closed to 0.18 and earlier, and info shows its id keys" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_cli_ordered_keys.ltdb";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+
+    const created = try runCli(allocator, &.{ "create", path });
+    defer created.deinit(allocator);
+    try std.testing.expect(created.succeeded());
+    const wrote = try runCli(allocator, &.{ "exec", path, "--query=CREATE (:Person {name: 'Ada'})" });
+    defer wrote.deinit(allocator);
+    try std.testing.expect(wrote.succeeded());
+
+    for ([_][]const u8{ "info", "check" }) |command| {
+        const json = try runCli(allocator, &.{ command, path, "--format=json" });
+        defer json.deinit(allocator);
+        const table = try runCli(allocator, &.{ command, path });
+        defer table.deinit(allocator);
+        if (!json.succeeded() or
+            std.mem.indexOf(u8, json.stdout, "\"min_reader_version\":5,\"min_reader_reasons\":[\"changefeed events\",\"ordered id keys\"]") == null or
+            std.mem.indexOf(u8, table.stdout, "v5, so 0.18 and earlier cannot open it (changefeed events, ordered id keys)") == null)
+        {
+            std.debug.print("{s}: exit {?d}\njson: {s}\ntable: {s}\n", .{ command, json.exit_code, json.stdout, table.stdout });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    const json = try runCli(allocator, &.{ "info", path, "--format=json" });
+    defer json.deinit(allocator);
+    const table = try runCli(allocator, &.{ "info", path });
+    defer table.deinit(allocator);
+    const csv = try runCli(allocator, &.{ "info", path, "--format=csv" });
+    defer csv.deinit(allocator);
+    if (std.mem.indexOf(u8, json.stdout, "\"format_version\":5,\"id_keys\":\"big-endian\"") == null or
+        std.mem.indexOf(u8, table.stdout, "Id keys:      big-endian") == null or
+        std.mem.indexOf(u8, csv.stdout, "id_keys,big-endian") == null)
+    {
+        std.debug.print("json: {s}\ntable: {s}\ncsv: {s}\n", .{ json.stdout, table.stdout, csv.stdout });
+        return error.TestUnexpectedResult;
     }
 }
 

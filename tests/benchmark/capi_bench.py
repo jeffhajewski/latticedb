@@ -42,7 +42,8 @@ def lat(prefix):
 
 
 # Single commits: 20,000 per run, so the automatic checkpoints (one per
-# 1,000 log frames) sit inside p99.9 rather than on the edge of p99.
+# 3,200 log frames with the default 100 MB cache) sit inside p99.9 rather
+# than on the edge of p99.
 def commit_lat():
     return ["commit_us_p50", "commit_us_p99", "commit_us_p999", "commit_us_max"]
 

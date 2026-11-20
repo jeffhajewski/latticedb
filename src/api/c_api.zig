@@ -4933,3 +4933,52 @@ test "cache_size_mb wins over LATTICE_BUFFER_POOL_MB; 0 leaves it to the variabl
     const unset_no_env = buildOpenOptionsV5(&.{ .cache_size_mb = 0 }) catch unreachable;
     try std.testing.expectEqual(100 * mib, unset_no_env.config.effectiveBufferPoolSize());
 }
+
+test "the default checkpoint interval follows cache_size_mb; a chosen one is used as given" {
+    const env = compat.env;
+    const path = "/tmp/lattice_capi_internal_ckpt_interval.db";
+    const cleanup = struct {
+        fn run() void {
+            inline for (.{ "", "-wal", "-journal" }) |suffix| compat.fs.cwd().deleteFile(path ++ suffix) catch {};
+        }
+    }.run;
+    cleanup();
+    defer cleanup();
+    env.unset(checkpoint_mod.AutoCheckpointConfig.environment_variable);
+
+    const frames = struct {
+        fn of(db: ?*lattice_database) !?u64 {
+            const handle = acquireDb(db) orelse return error.NoHandle;
+            defer releaseDb(handle);
+            const policy = handle.db.autoCheckpoint() orelse return null;
+            return policy.max_wal_frames;
+        }
+    }.of;
+
+    const cases = [_]struct { cache_mb: u32, frames: u64 }{
+        .{ .cache_mb = 4, .frames = 1000 },
+        .{ .cache_mb = 100, .frames = 3200 },
+    };
+    for (cases) |case| {
+        var db: ?*lattice_database = null;
+        const options = lattice_open_options{ .create = true, .cache_size_mb = case.cache_mb, .vector_dimensions = 0 };
+        try std.testing.expectEqual(lattice_error.ok, lattice_open(path, &options, &db));
+        defer _ = lattice_close(db);
+        try std.testing.expectEqual(@as(?u64, case.frames), try frames(db));
+
+        // The setter's count is used as it is; 0 is off.
+        try std.testing.expectEqual(lattice_error.ok, lattice_set_auto_checkpoint(db, 1000, 0));
+        try std.testing.expectEqual(@as(?u64, 1000), try frames(db));
+        try std.testing.expectEqual(lattice_error.ok, lattice_set_auto_checkpoint(db, 0, 0));
+        try std.testing.expectEqual(@as(?u64, null), try frames(db));
+    }
+
+    // So is the variable's.
+    env.set(checkpoint_mod.AutoCheckpointConfig.environment_variable, "1000");
+    defer env.unset(checkpoint_mod.AutoCheckpointConfig.environment_variable);
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{ .cache_size_mb = 100, .vector_dimensions = 0 };
+    try std.testing.expectEqual(lattice_error.ok, lattice_open(path, &options, &db));
+    defer _ = lattice_close(db);
+    try std.testing.expectEqual(@as(?u64, 1000), try frames(db));
+}

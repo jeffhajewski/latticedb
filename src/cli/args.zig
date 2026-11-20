@@ -254,7 +254,7 @@ pub const Args = struct {
     cache_size_mb: ?u32 = null,
     /// --auto-checkpoint: log frames between the checkpoints commits run, 0
     /// for none; null when not given (LATTICE_AUTO_CHECKPOINT_FRAMES, else
-    /// the engine's 1000).
+    /// the engine's default, scaled to the cache).
     auto_checkpoint_frames: ?u64 = null,
     page_size: u32 = 4096,
 

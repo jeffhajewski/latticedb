@@ -151,7 +151,8 @@ test "lfmt checkpoint: LATTICE_AUTO_CHECKPOINT_FRAMES sets the default, and the 
     const page = 4096;
     const options = c_api.lattice_open_options{ .create = true };
 
-    // Without the variable: 1000 frames, and a small commit is one frame.
+    // Without the variable: the default interval, 3200 frames for the
+    // 100 MB cache, and a small commit is one frame.
     {
         var db: ?*lattice_database = null;
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
@@ -204,7 +205,8 @@ test "lfmt checkpoint: a policy set on an open database decides when commits che
 
     db.setAutoCheckpoint(null);
     for (0..1100) |_| try commitNode(db);
-    // The default policy would have checkpointed at 1000 frames.
+    // The default policy for this 16 MB pool would have checkpointed at
+    // 1000 frames.
     try std.testing.expect(wal.header.frame_count > 1000);
 
     db.setAutoCheckpoint(.{ .max_wal_frames = 32 });
@@ -216,6 +218,138 @@ test "lfmt checkpoint: a policy set on an open database decides when commits che
     const stats = (try db.checkpoint(.truncate)).?;
     try std.testing.expect(stats.wal_truncated);
     try std.testing.expectEqual(@as(u64, 0), wal.header.frame_count);
+}
+
+const AutoCheckpointConfig = lattice.storage.checkpoint.AutoCheckpointConfig;
+const mib: u64 = 1024 * 1024;
+
+test "lfmt checkpoint: the default interval is an eighth of the cache, between 1000 frames and 64 MB" {
+    const frames = AutoCheckpointConfig.defaultMaxWalFrames;
+    // Small caches keep the old 1000 frames.
+    try std.testing.expectEqual(@as(u64, 1000), frames(0, 4096));
+    try std.testing.expectEqual(@as(u64, 1000), frames(256 * 1024, 4096));
+    try std.testing.expectEqual(@as(u64, 1000), frames(28 * mib, 4096));
+    // In between, an eighth of the cache.
+    try std.testing.expectEqual(@as(u64, 1280), frames(40 * mib, 4096));
+    try std.testing.expectEqual(@as(u64, 3200), frames(100 * mib, 4096));
+    // 64 MB of log at most.
+    try std.testing.expectEqual(@as(u64, 16384), frames(512 * mib, 4096));
+    try std.testing.expectEqual(@as(u64, 16384), frames(1024 * mib, 4096));
+    try std.testing.expectEqual(@as(u64, 16384), frames(64 * 1024 * mib, 4096));
+    // Bytes of log, counted in the log's own frames.
+    try std.testing.expectEqual(@as(u64, 250), frames(0, 16384));
+    try std.testing.expectEqual(@as(u64, 800), frames(100 * mib, 16384));
+    try std.testing.expectEqual(@as(u64, 4096), frames(1024 * mib, 16384));
+
+    // A frame count that was chosen is never scaled.
+    const chosen = (AutoCheckpointConfig{ .max_wal_frames = 7 }).resolved(1024 * mib, 4096);
+    try std.testing.expectEqual(@as(?u64, 7), chosen.max_wal_frames);
+    const default = (AutoCheckpointConfig{ .min_interval_ns = 5 }).resolved(100 * mib, 4096);
+    try std.testing.expectEqual(@as(?u64, 3200), default.max_wal_frames);
+    try std.testing.expectEqual(@as(u64, 5), default.min_interval_ns);
+}
+
+fn openInMemory(memory: *lattice.storage.memory_vfs.MemoryVfs, options: lattice.storage.database.OpenOptions) !*Database {
+    return Database.openWithVfs(std.testing.allocator, "db", options, memory.vfs());
+}
+
+fn defaultFrames(db: *const Database) ?u64 {
+    const policy = db.autoCheckpoint() orelse return null;
+    return policy.max_wal_frames;
+}
+
+test "lfmt checkpoint: an interval that was chosen is used as given, and the default is scaled to the pool" {
+    var memory = lattice.storage.memory_vfs.MemoryVfs.init(std.testing.allocator);
+    defer memory.deinit();
+    const pool = 40 * mib;
+
+    // Chosen when opened: kept, whatever the pool.
+    {
+        const db = try openInMemory(&memory, .{ .create = true, .config = .{
+            .enable_fts = false,
+            .buffer_pool_size = pool,
+            .auto_checkpoint = .{ .max_wal_frames = 1000, .mode = .full },
+        } });
+        defer db.close();
+        try std.testing.expectEqual(@as(?u64, 1000), defaultFrames(db));
+        try std.testing.expectEqual(lattice.storage.checkpoint.CheckpointMode.full, db.autoCheckpoint().?.mode);
+
+        // Back to the default: scaled to this handle's pool.
+        db.setAutoCheckpoint(.{});
+        try std.testing.expectEqual(@as(?u64, 1280), defaultFrames(db));
+        // Chosen later: kept.
+        db.setAutoCheckpoint(.{ .max_wal_frames = 7 });
+        try std.testing.expectEqual(@as(?u64, 7), defaultFrames(db));
+        db.setAutoCheckpoint(null);
+        try std.testing.expect(db.autoCheckpoint() == null);
+    }
+
+    // Not chosen: an eighth of the 40 MB pool.
+    {
+        const db = try openInMemory(&memory, .{ .config = .{ .enable_fts = false, .buffer_pool_size = pool } });
+        defer db.close();
+        try std.testing.expectEqual(@as(?u64, 1280), defaultFrames(db));
+    }
+
+    // A read-only handle and one without a log never checkpoint on commit,
+    // and say what the default would be.
+    {
+        const db = try openInMemory(&memory, .{ .read_only = true, .config = .{ .enable_fts = false, .buffer_pool_size = pool } });
+        defer db.close();
+        try std.testing.expect(db.wal == null);
+        try std.testing.expectEqual(@as(?u64, 1280), defaultFrames(db));
+    }
+    {
+        const db = try openInMemory(&memory, .{ .config = .{ .enable_fts = false, .enable_wal = false, .buffer_pool_size = pool } });
+        defer db.close();
+        try std.testing.expect(db.wal == null);
+        try std.testing.expectEqual(@as(?u64, 1280), defaultFrames(db));
+        try commitNode(db);
+    }
+
+    // An in-memory database keeps a small pool whatever is asked for, so
+    // its default stays at 1000 frames.
+    {
+        const db = try Database.open(std.testing.allocator, ":memory:", .{ .config = .{ .enable_fts = false, .buffer_pool_size = pool } });
+        defer db.close();
+        try std.testing.expectEqual(@as(?u64, 1000), defaultFrames(db));
+    }
+}
+
+test "lfmt checkpoint: by default commits checkpoint once the log reaches the scaled size, not before" {
+    var memory = lattice.storage.memory_vfs.MemoryVfs.init(std.testing.allocator);
+    defer memory.deinit();
+    const db = try openInMemory(&memory, .{ .create = true, .config = .{ .enable_fts = false, .buffer_pool_size = 40 * mib } });
+    defer db.close();
+    const wal = &db.wal.?;
+    const threshold = defaultFrames(db).?;
+    try std.testing.expectEqual(@as(u64, 1280), threshold);
+
+    // Up to just under the threshold, and past the old 1000: no commit
+    // checkpoints, so the log only grows.
+    var last = wal.header.frame_count;
+    while (wal.header.frame_count + 20 < threshold) {
+        try commitNode(db);
+        try std.testing.expect(wal.header.frame_count >= last);
+        last = wal.header.frame_count;
+    }
+    try std.testing.expect(last > 1000);
+
+    // Across it: a commit checkpoints and empties the log.
+    var checkpointed = false;
+    for (0..100) |_| {
+        try commitNode(db);
+        if (wal.header.frame_count < last) {
+            checkpointed = true;
+            break;
+        }
+        last = wal.header.frame_count;
+    }
+    try std.testing.expect(checkpointed);
+    // The commit before it left the log just short of the threshold, and
+    // this one, a frame or two, took it across.
+    try std.testing.expect(last < threshold and last + 8 >= threshold);
+    try std.testing.expect(wal.header.frame_count < 16);
 }
 
 test "lfmt checkpoint: the C stats struct and modes keep the header's layout and values" {

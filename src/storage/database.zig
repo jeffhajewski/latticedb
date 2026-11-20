@@ -443,7 +443,9 @@ pub const DatabaseConfig = struct {
     /// Without this the WAL only resets when the database is closed, so a
     /// long-running process accumulates frames without limit and pays for them
     /// again in recovery time. Set to null to opt out and manage checkpoints by
-    /// hand.
+    /// hand. The default leaves `max_wal_frames` unset, which scales the
+    /// interval to the buffer pool the database opens with (see
+    /// `AutoCheckpointConfig.defaultMaxWalFrames`).
     auto_checkpoint: ?checkpoint_mod.AutoCheckpointConfig = .{},
 
     /// On macOS, make every sync ask the drive to flush its cache
@@ -1272,8 +1274,9 @@ pub const Database = struct {
     /// When the last automatic checkpoint ran, for the minimum-interval check.
     last_auto_checkpoint_ns: i128,
     /// The policy commits checkpoint by: `config.auto_checkpoint` as opened,
-    /// then whatever `setAutoCheckpoint` last set. Whether the log is folded
-    /// in at open and close stays with `config.auto_checkpoint`.
+    /// then whatever `setAutoCheckpoint` last set, always with
+    /// `max_wal_frames` filled in. Whether the log is folded in at open and
+    /// close stays with `config.auto_checkpoint`.
     auto_checkpoint: ?checkpoint_mod.AutoCheckpointConfig,
     active_writer_txn_id: ?u64,
     /// Set when a commit that is already in the log could not be applied, or
@@ -1817,7 +1820,9 @@ pub const Database = struct {
         }
         self.txn_overlays = std.AutoHashMap(u64, TxnOverlay).init(allocator);
         self.last_auto_checkpoint_ns = @import("compat").nanoTimestamp();
-        self.auto_checkpoint = options.config.auto_checkpoint;
+        // After the buffer pool and the log exist: a default interval is
+        // scaled to the pool's real size and the log's frame size.
+        self.setAutoCheckpoint(options.config.auto_checkpoint);
         self.active_writer_txn_id = null;
         self.failed = false;
         self.fail_next_apply_for_testing = false;
@@ -1941,14 +1946,36 @@ pub const Database = struct {
     /// The trade-off: a larger `max_wal_frames` means fewer checkpoints, each
     /// longer (a checkpoint writes every page dirtied since the last one), a
     /// longer log on disk and more to replay after a crash. A smaller one
-    /// means shorter pauses, more often.
+    /// means shorter pauses, more often. Left null, `max_wal_frames` is
+    /// scaled to this handle's buffer pool, as `defaultMaxWalFrames` says.
     pub fn setAutoCheckpoint(self: *Self, policy: ?checkpoint_mod.AutoCheckpointConfig) void {
-        self.auto_checkpoint = policy;
+        const p = policy orelse {
+            self.auto_checkpoint = null;
+            return;
+        };
+        self.auto_checkpoint = p.resolved(self.bufferPoolBytes(), self.walFrameSize());
     }
 
-    /// The policy commits checkpoint by, as `setAutoCheckpoint` describes.
+    /// The policy commits checkpoint by, as `setAutoCheckpoint` describes,
+    /// with `max_wal_frames` always set: a default one says what it was
+    /// scaled to.
     pub fn autoCheckpoint(self: *const Self) ?checkpoint_mod.AutoCheckpointConfig {
         return self.auto_checkpoint;
+    }
+
+    /// The size of the buffer pool this handle opened with: the frames it
+    /// keeps, not the overflow it grows into while pages are pinned or dirty.
+    /// An in-memory database's pool is smaller than the configured one.
+    fn bufferPoolBytes(self: *const Self) u64 {
+        return @as(u64, self.buffer_pool.frame_count) * self.page_manager.getPageSize();
+    }
+
+    /// The size of one log frame. A handle without a log (opened read-only,
+    /// or with the log off) never checkpoints on commit; its policy is still
+    /// reported, sized as a log would be, which takes the page size.
+    fn walFrameSize(self: *const Self) u32 {
+        if (self.wal) |*wal| return wal.frame_size;
+        return self.page_manager.getPageSize();
     }
 
     pub fn checkpointWal(self: *Self, mode: checkpoint_mod.CheckpointMode) DatabaseError!void {
@@ -2054,7 +2081,9 @@ pub const Database = struct {
         if (self.read_only) return;
 
         const wal = if (self.wal) |*w| w else return;
-        if (wal.header.frame_count < policy.max_wal_frames) return;
+        const threshold = policy.max_wal_frames orelse
+            checkpoint_mod.AutoCheckpointConfig.defaultMaxWalFrames(self.bufferPoolBytes(), wal.frame_size);
+        if (wal.header.frame_count < threshold) return;
 
         const now = @import("compat").nanoTimestamp();
         const elapsed = now - self.last_auto_checkpoint_ns;

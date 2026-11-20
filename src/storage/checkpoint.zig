@@ -243,7 +243,8 @@ pub const Checkpointer = struct {
 /// Configuration for automatic checkpointing
 pub const AutoCheckpointConfig = struct {
     /// The variable that sets the default for the C API, the bindings and
-    /// the CLI: frames between automatic checkpoints, 0 for none.
+    /// the CLI: frames between automatic checkpoints, 0 for none. A frame
+    /// count set this way is used as it is, not scaled to the cache.
     pub const environment_variable = "LATTICE_AUTO_CHECKPOINT_FRAMES";
 
     /// The policy `LATTICE_AUTO_CHECKPOINT_FRAMES` asks for: the default one
@@ -268,8 +269,50 @@ pub const AutoCheckpointConfig = struct {
         }
     };
 
-    /// WAL frames written before a checkpoint is considered.
-    max_wal_frames: u64 = 1000,
+    /// Where the default interval comes from, when no one chose one.
+    ///
+    /// A checkpoint writes every page dirtied since the last one twice (into
+    /// the journal, then in place) and syncs, so checkpointing often throws
+    /// away what a large page cache could hold. A bulk load of 1M nodes and
+    /// 2M relationships, 10K rows per transaction, took 12.1 s with a 1 GB
+    /// cache at the old fixed 1000 frames (4 MB of log) and 8.6 s at 64 MB of
+    /// log. With the 100 MB default cache the interval made no measurable
+    /// difference, since the flush that runs when half the cache is dirty
+    /// dominates there. So the log may grow to an eighth of the cache:
+    ///
+    /// - the floor is the old default, 1000 frames of 4096 bytes, so a small
+    ///   cache checkpoints as often as it always did;
+    /// - the cap, 64 MB, bounds the log left to replay after a crash and the
+    ///   size of the `-wal` file on disk.
+    pub const scaled_default = struct {
+        /// The log may grow to `cache bytes / cache_divisor`, between the two
+        /// bounds below.
+        pub const cache_divisor: u64 = 8;
+        pub const min_log_bytes: u64 = 1000 * 4096;
+        pub const max_log_bytes: u64 = 64 * 1024 * 1024;
+    };
+
+    /// The frame count commits checkpoint at by default, for a page cache of
+    /// `cache_bytes` and a log whose frames are `frame_size` bytes.
+    pub fn defaultMaxWalFrames(cache_bytes: u64, frame_size: u32) u64 {
+        const d = scaled_default;
+        const log_bytes = std.math.clamp(cache_bytes / d.cache_divisor, d.min_log_bytes, d.max_log_bytes);
+        return @max(1, log_bytes / @max(1, frame_size));
+    }
+
+    /// This policy with `max_wal_frames` filled in: as given when it was
+    /// chosen, otherwise scaled to the page cache.
+    pub fn resolved(self: AutoCheckpointConfig, cache_bytes: u64, frame_size: u32) AutoCheckpointConfig {
+        var policy = self;
+        if (policy.max_wal_frames == null) policy.max_wal_frames = defaultMaxWalFrames(cache_bytes, frame_size);
+        return policy;
+    }
+
+    /// WAL frames written before a checkpoint is considered. Null, the
+    /// default, scales it to the page cache (`defaultMaxWalFrames`): from
+    /// 1000 frames for a small cache up to 64 MB of log for a cache of
+    /// 512 MB or more. A number set here is used as it is.
+    max_wal_frames: ?u64 = null,
     /// Shortest gap between two automatic checkpoints, in nanoseconds.
     ///
     /// Zero by default, because under `.truncate` the frame threshold already

@@ -2132,7 +2132,8 @@ fn printUsage(writer: anytype) void {
         \\  --page-size=<bytes>   Page size in bytes, 4096..65535 (default: 4096)
         \\  --auto-checkpoint=<n> Checkpoint after n log frames, 0 for never during
         \\                        the command (default: LATTICE_AUTO_CHECKPOINT_FRAMES,
-        \\                        else 1000). Closing still checkpoints.
+        \\                        else an eighth of the cache, 1000 to 16384 frames;
+        \\                        2048 with the 64 MB cache). Closing still checkpoints.
         \\  --file=<path>         Input/output file for import/export
         \\  --query=<cypher>      Query string for exec command
         \\  --no-lock             Skip the file lock, for filesystems without one

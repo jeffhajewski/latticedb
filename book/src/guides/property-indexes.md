@@ -391,7 +391,7 @@ From Zig, `Database.upgradePropertyIndexes()` does the same and returns how
 many it rebuilt. Either way it reads every node of the label (or relationship
 of the type) once, as creating the index does, in one step that a crash
 undoes completely, and it marks the file as needing format 4 as creating an
-index does.
+index does (a file this release created already needs format 5).
 
 ## Where to go next
 

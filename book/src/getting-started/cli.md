@@ -231,8 +231,9 @@ Database: people.lattice
 Size:         68 KB
 Nodes:        2
 Edges:        1
-Format:       v4
-Min reader:   v4, so 0.16.0 cannot open it (ordered property index, changefeed events)
+Format:       v5
+Id keys:      big-endian (format 5: scans return ascending ids)
+Min reader:   v5, so 0.18 and earlier cannot open it (ordered property index, changefeed events, ordered id keys)
 Vector:       enabled
   Dimensions: 384
   Metric:     cosine
@@ -244,12 +245,19 @@ Index:        :Person(age)  ordered_dense
 Index:        [:KNOWS](since)  ordered
 ```
 
-`Min reader` is the oldest LatticeDB that can open the file, and, when 0.16.0
-cannot, what keeps it out: `changefeed events`, `ordered property index`,
-`vector index settings` (a metric other than cosine, or an `M` other than 16)
-or `full-text positions`. Storing changefeed events is the usual reason, since
-the database keeps them by default. A file that has none of these says `v3`
-and still opens in 0.16.0
+`Format` is the format the file was last written in. `Id keys` says how the
+file stores node, edge and document ids as keys: a file created by this
+release has `big-endian` keys, stored in id order; one created by 0.18 or
+earlier keeps `little-endian (created before format 5)` for good.
+
+`Min reader` is the oldest LatticeDB that can open the file, and what keeps
+older ones out. `ordered id keys` is in every file this release creates and
+needs format 5: 0.18 and earlier cannot open it. A file created before format 5
+needs no more than `v4`, which 0.17 and 0.18 open, and says why 0.16.0 cannot:
+`changefeed events`, `ordered property index`, `vector index settings` (a
+metric other than cosine, or an `M` other than 16) or `full-text positions`.
+Storing changefeed events is the usual reason, since the database keeps them
+by default. A file that has none of these says `v3` and still opens in 0.16.0
 ([Opening with 0.16.0](../guides/changefeed.md#opening-with-0160)).
 
 `Vector` gives the index's settings, which are fixed when it is created.
@@ -265,11 +273,11 @@ created by LatticeDB 0.16.0 shows `digest`: it answers equality only until
 the indexes as objects:
 
 ```text
-{"path":"people.lattice","size_kb":68,"nodes":2,"edges":1,"format_version":4,"vector_enabled":true,"min_reader_version":4,"min_reader_reasons":["ordered property index","changefeed events"],"vector_dimensions":384,"vector_metric":"cosine","vector_m":16,"vector_ef_construction":200,"fts_enabled":true,"changefeed_retention":"all","changefeed_oldest_sequence":1,"changefeed_last_sequence":10,"property_indexes":[{"entity":"node","scope":"Person","property":"age","encoding":"ordered_dense"},{"entity":"relationship","scope":"KNOWS","property":"since","encoding":"ordered"}]}
+{"path":"people.lattice","size_kb":68,"nodes":2,"edges":1,"format_version":5,"id_keys":"big-endian","vector_enabled":true,"min_reader_version":5,"min_reader_reasons":["ordered property index","changefeed events","ordered id keys"],"vector_dimensions":384,"vector_metric":"cosine","vector_m":16,"vector_ef_construction":200,"fts_enabled":true,"changefeed_retention":"all","changefeed_oldest_sequence":1,"changefeed_last_sequence":10,"property_indexes":[{"entity":"node","scope":"Person","property":"age","encoding":"ordered_dense"},{"entity":"relationship","scope":"KNOWS","property":"since","encoding":"ordered"}]}
 ```
 
 `--format=csv` gives `property,value` rows with the same names, the reasons
-joined by `;` (`min_reader_reasons,ordered property index;changefeed events`)
+joined by `;` (`min_reader_reasons,ordered property index;changefeed events;ordered id keys`)
 and one `property_index` row per index (`property_index,:Person(age)
 ordered_dense`).
 
@@ -505,7 +513,7 @@ lattice check social.lattice
 ```text
 Database file checks passed
   Pages checked: 15
-  Min reader:    v4, so 0.16.0 cannot open it (changefeed events)
+  Min reader:    v5, so 0.18 and earlier cannot open it (changefeed events, ordered id keys)
   Note: sibling WAL file exists but was not validated
 ```
 

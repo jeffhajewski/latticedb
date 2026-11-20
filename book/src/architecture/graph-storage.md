@@ -92,9 +92,44 @@ Nodes are stored in a B+Tree with simple u64 keys:
 
 ```
 NODES B+Tree:
-  Key: node_id (u64, little-endian)
+  Key: node_id (u64, big-endian in a format-5 file, little-endian in an older one)
   Value: NodeData (serialized)
 ```
+
+### Id Key Order
+
+The B+Tree compares keys byte by byte. Until format 5 the node tree, the
+edge-ID index, the full-text document trees and the vector index's node tree
+all wrote their u64 ids little-endian, lowest byte first. That made byte order
+and id order disagree: id 256 is `00 01 00 …` and sorts between 0 and 1. Ids
+are handed out in sequence, so each new one landed in a different leaf rather
+than at the right edge of the tree. A load of 1,000,000 nodes and 2,000,000
+relationships left the node tree 73% full and the edge-ID index 69% full, and
+every insert dirtied a different page.
+
+Format 5 writes those ids **big-endian**. Byte order is now id order, new ids
+append at the right edge, and the B+Tree's in-order split keeps the leaves
+full. On the same load the two trees ended 99% full (node tree 70.6 → 51.9 MB,
+edge-ID index 100 → 69 MB), the default load went from about 35 s to 27 s,
+and a load without the log from 8 s to 6.3 s.
+
+The order is a property of the file, chosen when it is created and never
+changed. A file created in format 5 sets `FileFlags.ORDERED_ID_KEYS` in its
+header and requires a format-5 reader (`min_reader_version` 5), so 0.17 and
+0.18, which would decode every id wrongly, refuse it. A file created earlier
+keeps its little-endian keys: it is not converted, every read and write on it
+uses the old order, and it stays open to 0.17 and 0.18. The database reads the
+order from the header once at open (`Database.id_key_order`) and hands it to
+the node store, the edge store, the full-text index and the vector index;
+`src/core/id_key.zig` does the encoding. `DatabaseConfig.new_database_id_keys
+= .little` creates a new file in the old layout, for a file that 0.18 has to
+read.
+
+Only the keys changed. Values (the edge payload, the next edge id, document
+lengths, the vector index's node entries) are little-endian in every format.
+The symbol table's u16 ids are little-endian keys too, and stay so in format 5:
+the table holds at most 65,535 entries and is walked whole on open, so their
+order costs nothing.
 
 ### NodeData Format
 
@@ -229,14 +264,16 @@ commit included.
 
 ### Edge-ID Index
 
-The edge-ID tree is a separate B+Tree from the traversal tree. Unlike the
-traversal keys, its keys are **little-endian** u64 edge IDs, because nothing
-needs them in ID order: lookups are by exact ID, and a walk of the whole tree
-comes back in a stable order that is not numeric (edge 256 before edge 2).
+The edge-ID tree is a separate B+Tree from the traversal tree. Its keys are u64
+edge IDs in the file's id key order (see [Id Key Order](#id-key-order)):
+big-endian in a format-5 file, so a walk of the whole tree comes back in
+ascending ID order; little-endian in a file created earlier, where the walk is
+in a stable order that is not numeric (edge 256 before edge 2). Lookups are by
+exact ID in either.
 
 | Key | Value |
 |-----|-------|
-| `0` (`EDGE_ID_META_KEY`) | `next_edge_id: u64`, little-endian |
+| `0` (`EDGE_ID_META_KEY`, all zero bytes in either order) | `next_edge_id: u64`, little-endian |
 | `edge_id` (≥ 1) | Edge payload, see below |
 
 Key 0 is reserved: it stores the next edge ID to hand out, so IDs survive a
@@ -543,8 +580,12 @@ describes the underlying graph-storage structures.
    to be closed to 0.16.0; a prototype also cost 7% on edge creation. A pattern
    that starts from a type, `()-[r:KNOWS]->()`, walks the edge-ID index once
    instead (66 ms to 20 ms for a count over 1,000,000 edges).
-3. **The edge-ID index walks in a non-numeric order** (its keys are
-   little-endian), and that is the row order of a type-only pattern.
+3. **In a file created before format 5 the edge-ID index walks in a
+   non-numeric order** (its keys are little-endian), and that is the row order
+   of a type-only pattern. In a format-5 file the walk, and so the row order of
+   a type-only pattern, is ascending edge ID. Neither is a promise: a query that
+   needs an order says `ORDER BY`. `MATCH (n)` sorts its node ids and is
+   ascending in both.
 
 ## Future Enhancements
 
@@ -556,9 +597,9 @@ describes the underlying graph-storage structures.
 |-----------|------------|---------|
 | Symbol Table (forward) | string | String → ID mapping |
 | Symbol Table (reverse) | symbol_id | ID → String mapping |
-| Node Store | node_id | Node data storage |
+| Node Store | node_id (file's id key order) | Node data storage |
 | Edge Store | (src, dir, type, tgt, edge_id) | Traversal keys |
-| Edge ID Index | edge_id | Stable edge identity and property payload |
+| Edge ID Index | edge_id (file's id key order) | Stable edge identity and property payload |
 | Label Index | (label_id, node_id) | Label-based queries |
 | Property Index Catalog | (entity_kind, scope_id, property_id) | Durable explicit index definitions |
 | Node Property Index | (scope_id, property_id, encoded value, node_id) | Indexed node-property equality, range and prefix lookup |

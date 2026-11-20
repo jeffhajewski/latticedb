@@ -145,8 +145,9 @@ only the node's label ids. `properties()` still decodes the whole record.
 
 ```
 open():  Collect every node id visible to the transaction into a slice,
-           sorted, so rows come in id order (node keys are little-endian, so
-           the tree walk alone is not)
+           sorted, so rows come in id order (in a file created before format 5
+           node keys are little-endian, so the tree walk alone is not, and
+           the transaction's own nodes come after the tree's in any file)
 next():  Take the next id from the slice, set output slot
 close(): Free the slice
 ```

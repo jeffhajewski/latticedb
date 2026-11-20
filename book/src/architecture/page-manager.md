@@ -48,10 +48,10 @@ little-endian); the rest of page 0 is zero.
 | Offset | Size | Field |
 |--------|------|-------|
 | 0–3 | 4 B | Magic number — `0x4C544442` (`"LTDB"`) |
-| 4–5 | 2 B | Format version (currently 4) |
+| 4–5 | 2 B | Format version (currently 5) |
 | 6–7 | 2 B | Minimum reader version |
 | 8–11 | 4 B | Page size |
-| 12–15 | 4 B | Flags |
+| 12–15 | 4 B | Flags (`0x08` checksums, `0x20` sealed pages, `0x40` ordered id keys) |
 | 16–23 | 8 B | Node count |
 | 24–31 | 8 B | Edge count |
 | 32–35 | 4 B | Legacy B+Tree root page (unused, kept for compatibility) |
@@ -419,22 +419,33 @@ The header has two gates for older releases:
   `NeedsNewerWriter` (`LATTICE_ERROR_NEEDS_NEWER_WRITER`) before anything is
   written; a read-only open works. 0 means no restriction.
 
-This release is format 4. A read-write open of an older file sets the format version
-to 4 and writes the format-4 fields; it never lowers either gate, and raises the
-minimum writer version to 4. The minimum reader version stays 3, so 0.16.0 can still
-open the file, until the file holds something 0.16.0 would misread rather than
-refuse. Then it becomes 4, and the bit for the reason is set in the minimum reader
-reasons:
+This release is format 5. Format 5 changed one thing: a file it creates writes node,
+edge and document ids as big-endian B-tree keys, so ids handed out in order are
+stored in order (see [Graph Storage](./graph-storage.md#id-key-order)). Such a file
+sets the flag `ORDERED_ID_KEYS` (`0x40`) and is created with minimum reader version
+5 and the reason `ordered id keys`, so 0.17 and 0.18 (format 4), which would decode
+every id wrongly, refuse it with `VersionTooNew`. The flag is in the 200 bytes every
+release keeps, and is never set or cleared after creation.
 
-| Bit | Reason | Raised when |
-|-----|--------|-------------|
-| `0x01` | vector index settings | the vector index uses a metric other than cosine or an `m` other than 16 (`ef_construction` only affects how new vectors are inserted, so it does not count) |
-| `0x02` | ordered property index | a property index is declared; 0.16.0 would take its keys for digests and find nothing |
-| `0x04` | changefeed events | a commit records its first changefeed event; 0.16.0's `changes()` would skip events in this release's format without an error, and its trim would leave them |
-| `0x08` | full-text positions | a full-text index that stores word positions takes its first document; 0.16.0 would append posting entries without a position count and garble the page |
+A file created before format 5 keeps its little-endian keys. A read-write open of
+such a file sets the format version to 5 and writes the format-4 fields; it never
+lowers either gate, and raises the minimum writer version to 5, so 0.17 and 0.18 may
+still read it but open it read-only. Its minimum reader version is decided by what
+it holds, never by this release's format: it stays 3, so 0.16.0 can still open the
+file, until the file holds something 0.16.0 would misread rather than refuse. Then
+it becomes 4, which 0.17 and 0.18 read, and the bit for the reason is set in the
+minimum reader reasons. Each reason requires the format that introduced it:
+
+| Bit | Reason | Requires | Raised when |
+|-----|--------|----------|-------------|
+| `0x01` | vector index settings | 4 | the vector index uses a metric other than cosine or an `m` other than 16 (`ef_construction` only affects how new vectors are inserted, so it does not count) |
+| `0x02` | ordered property index | 4 | a property index is declared; 0.16.0 would take its keys for digests and find nothing |
+| `0x04` | changefeed events | 4 | a commit records its first changefeed event; 0.16.0's `changes()` would skip events in this release's format without an error, and its trim would leave them |
+| `0x08` | full-text positions | 4 | a full-text index that stores word positions takes its first document; 0.16.0 would append posting entries without a position count and garble the page |
+| `0x10` | ordered id keys | 5 | the file is created in format 5 (never later) |
 
 Opening never raises it: a read-only open changes nothing, and a read-write open that
-writes nothing leaves the version at 3. A changefeed with retention `off` records no
+writes nothing leaves the version where it was (3 for an untouched old file). A changefeed with retention `off` records no
 events, so it does not raise it either. Nothing lowers it again, not even a trim that
 drops every event, because the file cannot tell that no copy of an event survives in
 a log or a backup taken in between. `lattice info` and `lattice check` print the
@@ -452,6 +463,12 @@ header the replay's flushes write, in case a stale journal put an older header b
 The other three raise the header in memory, and it reaches the file no later than
 what they describe: in the same flush for a vector index and for a full-text index's
 first postings, and before the first entry for a property index.
+
+An earlier version of this rule said "raise it to this release's format". That was
+the same number while format 4 was current; with format 5 it would have closed every
+old file to 0.17 and 0.18 the first time this release wrote a changefeed event to
+it, for nothing those releases cannot read. `FileHeader.ReaderReason.version` now
+gives each reason's own requirement.
 
 0.16.0 predates the minimum writer version: it opens and writes a file that asks for
 a newer writer, and zeroes the field as it writes the header. So a later feature that

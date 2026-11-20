@@ -367,7 +367,7 @@ computed against an empty corpus. The same tree also holds the index's analysis
 record (section 1).
 
 A search looks up the lengths of all the documents it scores in one pass, sorted
-by key, with a cursor that seeks forward through the tree, so neighbouring keys
+by key (the file's id key order), with a cursor that seeks forward through the tree, so neighbouring keys
 share a descent instead of costing one each. A storage error while reading
 lengths fails the search rather than dropping the document.
 
@@ -891,6 +891,12 @@ what one document costs whenever it is indexed.
 | DocLengths | 4-byte scope prefix + DocId (8 bytes) | Length (4 bytes) |
 | Reverse index | 4-byte scope prefix + DocId | Terms the document contributed |
 | Index catalog | `[kind, scope_id, property_id]` | empty; the key is the record |
+
+The DocId in a key is in the file's id key order: big-endian in a file created
+in format 5, little-endian in one created earlier (see
+[Graph Storage](./graph-storage.md#id-key-order)). The store takes the order
+when the database opens, and the batched length lookup sorts its documents by
+that key order, not by id, so its cursor only moves forward in either.
 
 The scope prefix is what keeps one declared index out of another's way; section
 14 explains it. The catalog shares its tree with the property indexes, under

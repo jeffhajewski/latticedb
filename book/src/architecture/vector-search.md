@@ -300,8 +300,11 @@ The graph itself is stored apart from the vectors:
   slots with room for `m_max0` neighbours at layer 0 and `m` at each layer above.
 - **The node registry** maps each vector ID to its top layer, its vector
   location and its connection slot. It is kept in memory while the database is
-  open and written to a dedicated B+Tree (`hnsw_node_tree`), together with the
-  entry point and layer count, before every flush of the buffer pool: at each
+  open and written to a dedicated B+Tree (`hnsw_node_tree`), keyed by the
+  vector ID in the file's id key order (big-endian in a file created in format
+  5, little-endian before; see [Graph Storage](./graph-storage.md#id-key-order)),
+  together with the entry point and layer count under the all-`0xFF` key,
+  before every flush of the buffer pool: at each
   checkpoint, at `sync` and close, and at the early flushes a large transaction
   triggers. So the file never holds vector pages newer than the registry that
   describes them. A save writes only the entries added, changed or removed since

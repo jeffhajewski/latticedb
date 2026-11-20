@@ -387,8 +387,10 @@ Changefeed of ontology.lattice
 the policy and range on one line (`Changefeed:   keep last:2, events 4..5`).
 Events still in the 0.16.0 format are counted separately
 (`Events held: 1200 (800 in the 0.16 format)`).
-`lattice info` and `lattice check` also say whether 0.16.0 can open the file
-(`Min reader:   v4, so 0.16.0 cannot open it (changefeed events)`).
+`lattice info` and `lattice check` also say whether 0.16.0 can open a file
+created before format 5 (`Min reader:   v4, so 0.16.0 cannot open it
+(changefeed events)`); a file created by this release says `v5, so 0.18 and
+earlier cannot open it`.
 
 ### Environment
 
@@ -589,7 +591,11 @@ bindings, "Failed to open database: IoError" from its CLI. The version is never
 lowered, also not when a retention policy later drops every event, since a copy
 of an event may survive in a log or a backup.
 
-A file this release only reads, and a file created with retention `off`, keep
+All of this is about files created before format 5. A file created in format 5
+(the default from the release after 0.18.1) already needs a format-5 reader, so
+neither 0.16.0 nor 0.17 and 0.18 open it, events or not.
+
+An older file this release only reads, and one created with retention `off`, keep
 version 3 and stay open to 0.16.0 unless something else raised it (a vector
 index 0.16.0 cannot describe, an ordered property index, a full-text index
 holding documents with word positions). To take a written

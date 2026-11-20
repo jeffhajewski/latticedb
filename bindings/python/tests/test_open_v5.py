@@ -232,9 +232,10 @@ class TestNeedsNewerWriter:
                 txn.commit()
 
         # min_writer_version is a little-endian u16 at byte 222 of the header.
+        # This release writes format 5; 6 is a format it does not know.
         with open(db_path, "r+b") as f:
             f.seek(222)
-            f.write((5).to_bytes(2, "little"))
+            f.write((6).to_bytes(2, "little"))
 
         with pytest.raises(LatticeNeedsNewerWriterError) as info:
             Database(db_path).open()
@@ -254,9 +255,10 @@ class TestVersionTooNew:
                 txn.commit()
 
         # min_reader_version is a little-endian u16 at byte 6 of the header.
+        # This release reads format 5; 6 is a format it does not know.
         with open(db_path, "r+b") as f:
             f.seek(6)
-            f.write((5).to_bytes(2, "little"))
+            f.write((6).to_bytes(2, "little"))
 
         for read_only in (False, True):
             with pytest.raises(LatticeVersionMismatchError) as info:

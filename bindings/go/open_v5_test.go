@@ -239,11 +239,12 @@ func TestFileMarkedForNewerWritersOpensOnlyReadOnly(t *testing.T) {
 	}
 
 	// min_writer_version is a little-endian u16 at byte 222 of the header.
+	// This release writes format 5; 6 is a format it does not know.
 	f, err := os.OpenFile(dbPath, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatalf("open file: %v", err)
 	}
-	if _, err := f.WriteAt([]byte{5, 0}, 222); err != nil {
+	if _, err := f.WriteAt([]byte{6, 0}, 222); err != nil {
 		t.Fatalf("patch header: %v", err)
 	}
 	if err := f.Close(); err != nil {
@@ -281,11 +282,12 @@ func TestFileInANewerFormatIsAVersionMismatch(t *testing.T) {
 	}
 
 	// min_reader_version is a little-endian u16 at byte 6 of the header.
+	// This release reads format 5; 6 is a format it does not know.
 	f, err := os.OpenFile(dbPath, os.O_RDWR, 0)
 	if err != nil {
 		t.Fatalf("open file: %v", err)
 	}
-	if _, err := f.WriteAt([]byte{5, 0}, 6); err != nil {
+	if _, err := f.WriteAt([]byte{6, 0}, 6); err != nil {
 		t.Fatalf("patch header: %v", err)
 	}
 	if err := f.Close(); err != nil {

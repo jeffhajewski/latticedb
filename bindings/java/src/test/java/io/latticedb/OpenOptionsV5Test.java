@@ -173,9 +173,10 @@ class OpenOptionsV5Test {
         }
 
         // min_writer_version is a little-endian u16 at byte 222 of the header.
+        // This release writes format 5; 6 is a format it does not know.
         try (RandomAccessFile file = new RandomAccessFile(path, "rw")) {
             file.seek(222);
-            file.write(new byte[]{5, 0});
+            file.write(new byte[]{6, 0});
         }
 
         assertCode(ErrorCode.NEEDS_NEWER_WRITER,
@@ -194,9 +195,10 @@ class OpenOptionsV5Test {
         }
 
         // min_reader_version is a little-endian u16 at byte 6 of the header.
+        // This release reads format 5; 6 is a format it does not know.
         try (RandomAccessFile file = new RandomAccessFile(path, "rw")) {
             file.seek(6);
-            file.write(new byte[]{5, 0});
+            file.write(new byte[]{6, 0});
         }
 
         assertCode(ErrorCode.VERSION_MISMATCH,

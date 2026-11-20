@@ -163,9 +163,10 @@ describeIfNative('open options v5, detach delete and edge endpoints', () => {
     await db.close();
 
     // min_writer_version is a little-endian u16 at byte 222 of the header.
+    // This release writes format 5; 6 is a format it does not know.
     const fd = fs.openSync(dbPath, 'r+');
     try {
-      fs.writeSync(fd, Buffer.from([5, 0]), 0, 2, 222);
+      fs.writeSync(fd, Buffer.from([6, 0]), 0, 2, 222);
     } finally {
       fs.closeSync(fd);
     }
@@ -192,9 +193,10 @@ describeIfNative('open options v5, detach delete and edge endpoints', () => {
     await db.close();
 
     // min_reader_version is a little-endian u16 at byte 6 of the header.
+    // This release reads format 5; 6 is a format it does not know.
     const fd = fs.openSync(dbPath, 'r+');
     try {
-      fs.writeSync(fd, Buffer.from([5, 0]), 0, 2, 6);
+      fs.writeSync(fd, Buffer.from([6, 0]), 0, 2, 6);
     } finally {
       fs.closeSync(fd);
     }

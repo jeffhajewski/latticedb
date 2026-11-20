@@ -131,6 +131,9 @@ pub const EdgeKey = struct {
     target: NodeId,
     edge_id: EdgeId,
 
+    /// A traversal key's length in bytes.
+    pub const SIZE = 27;
+
     /// Serialize key to bytes (27 bytes total)
     pub fn toBytes(self: EdgeKey) [27]u8 {
         var buf: [27]u8 = undefined;
@@ -424,6 +427,138 @@ pub const EdgeStore = struct {
             self.tree.delete(&outgoing_bytes) catch {};
             return mapBTreeError(err);
         };
+
+        if (edge_id >= self.next_edge_id) {
+            const new_next = edge_id + 1;
+            try self.persistNextEdgeId(new_next);
+            self.next_edge_id = new_next;
+        }
+    }
+
+    /// An edge's two traversal keys: the one that leaves its source, then
+    /// the one that enters its target.
+    pub fn traversalKeys(
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+    ) [2][EdgeKey.SIZE]u8 {
+        return .{
+            (EdgeKey{
+                .source = source,
+                .direction = .outgoing,
+                .edge_type = edge_type,
+                .target = target,
+                .edge_id = edge_id,
+            }).toBytes(),
+            (EdgeKey{
+                .source = target,
+                .direction = .incoming,
+                .edge_type = edge_type,
+                .target = source,
+                .edge_id = edge_id,
+            }).toBytes(),
+        };
+    }
+
+    /// Insert one traversal key of an edge whose record is written later by
+    /// `createRecordWithId`.
+    ///
+    /// A commit that creates many edges inserts all their traversal keys in
+    /// key order first, so that every key bound for a page arrives while the
+    /// page is in memory, and writes the records afterwards. Between the two
+    /// the tree holds keys of edges that have no record yet. Nothing reads
+    /// such an edge: readers that began earlier were told it does not exist
+    /// before the first key went in, and recovery completes it from the log
+    /// (`ensureWithId`).
+    pub fn insertTraversalKey(self: *Self, key: *const [EdgeKey.SIZE]u8) EdgeError!void {
+        self.tree.insert(key, &[_]u8{}) catch |err| return switch (err) {
+            BTreeError.DuplicateKey => EdgeError.AlreadyExists,
+            else => mapBTreeError(err),
+        };
+    }
+
+    /// Write the record of an edge whose two traversal keys
+    /// `insertTraversalKey` has put in the tree: `createWithId` without them.
+    pub fn createRecordWithId(
+        self: *Self,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+        properties: []const Property,
+    ) EdgeError!void {
+        if (edge_id == EDGE_ID_META_KEY) return EdgeError.InvalidData;
+
+        const serialized = try self.serializeEdgeAlloc(source, target, edge_type, properties);
+        defer self.allocator.free(serialized);
+
+        const id_key = edgeIdToKey(edge_id);
+        if (!self.edge_id_index.canFitLeafEntry(&id_key, serialized.len)) {
+            return EdgeError.BufferTooSmall;
+        }
+        self.edge_id_index.insert(&id_key, serialized) catch |err| return switch (err) {
+            BTreeError.DuplicateKey => EdgeError.AlreadyExists,
+            else => mapBTreeError(err),
+        };
+
+        if (edge_id >= self.next_edge_id) {
+            const new_next = edge_id + 1;
+            try self.persistNextEdgeId(new_next);
+            self.next_edge_id = new_next;
+        }
+    }
+
+    /// Make the edge exist with exactly these endpoints, type and
+    /// properties, whatever part of it the trees already hold. For recovery.
+    ///
+    /// The file a log is replayed onto can hold an edge in part. A commit
+    /// that creates many edges inserts their traversal keys first and their
+    /// records after, and a flush in between writes that state to the file;
+    /// so can a crash while an edge is being created or deleted one entry at
+    /// a time. Each entry is put in place if it is missing and left alone if
+    /// it is there. A record that names other endpoints or another type has
+    /// its own traversal keys taken out first.
+    pub fn ensureWithId(
+        self: *Self,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+        properties: []const Property,
+    ) EdgeError!void {
+        if (edge_id == EDGE_ID_META_KEY) return EdgeError.InvalidData;
+
+        if (self.getRefById(edge_id)) |old| {
+            if (old.source != source or old.target != target or old.edge_type != edge_type) {
+                const stale = traversalKeys(edge_id, old.source, old.target, old.edge_type);
+                for (&stale) |*key| {
+                    self.tree.delete(key) catch |err| switch (err) {
+                        BTreeError.KeyNotFound => {},
+                        else => return mapBTreeError(err),
+                    };
+                }
+            }
+        } else |err| switch (err) {
+            EdgeError.NotFound => {},
+            else => return err,
+        }
+
+        const serialized = try self.serializeEdgeAlloc(source, target, edge_type, properties);
+        defer self.allocator.free(serialized);
+        const id_key = edgeIdToKey(edge_id);
+        if (!self.edge_id_index.canFitLeafEntry(&id_key, serialized.len)) {
+            return EdgeError.BufferTooSmall;
+        }
+
+        const keys = traversalKeys(edge_id, source, target, edge_type);
+        for (&keys) |*key| {
+            self.tree.insert(key, &[_]u8{}) catch |err| switch (err) {
+                BTreeError.DuplicateKey => {},
+                else => return mapBTreeError(err),
+            };
+        }
+        self.edge_id_index.put(&id_key, serialized) catch |err| return mapBTreeError(err);
 
         if (edge_id >= self.next_edge_id) {
             const new_next = edge_id + 1;

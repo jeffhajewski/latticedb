@@ -36,6 +36,7 @@ const lse_fts_ddl_test = @import("lse_fts_ddl_test.zig");
 const lse_vector_filter_test = @import("lse_vector_filter_test.zig");
 const lcy_cypher_phase2_test = @import("lcy_cypher_phase2_test.zig");
 const lnp_null_property_test = @import("lnp_null_property_test.zig");
+const lbl_bulk_apply_test = @import("lbl_bulk_apply_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -75,6 +76,7 @@ test {
     _ = lrdf_rdf_test;
     // Graph storage: edge updates, ordered property indexes, type scans
     _ = lgr_graph_storage_test;
+    _ = lbl_bulk_apply_test;
     _ = lcf_changefeed_golden_test;
     _ = lcf_changefeed_order_test;
     _ = lcf_changefeed_retention_test;

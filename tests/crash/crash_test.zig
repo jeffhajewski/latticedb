@@ -2322,3 +2322,165 @@ test "index declarations and drops that returned survive a kill" {
         try std.testing.expect(!try reopened.hasNodeFtsIndex("Person", "bio"));
     }
 }
+
+/// The edges a node leaves by and arrives by, as ids, for comparing with
+/// what a test created.
+fn expectEdgesOnce(db: *Database, allocator: std.mem.Allocator, nodes: []const NodeId, edges: []const [3]u64) !void {
+    var out_total: usize = 0;
+    var in_total: usize = 0;
+    for (nodes) |node| {
+        const out = try db.getOutgoingEdgeRefsInTxn(null, node);
+        defer allocator.free(out);
+        const in = try db.getIncomingEdgeRefsInTxn(null, node);
+        defer allocator.free(in);
+        out_total += out.len;
+        in_total += in.len;
+        for (edges) |edge| {
+            var seen_out: usize = 0;
+            for (out) |ref| {
+                if (ref.id == edge[0]) seen_out += 1;
+            }
+            var seen_in: usize = 0;
+            for (in) |ref| {
+                if (ref.id == edge[0]) seen_in += 1;
+            }
+            try std.testing.expectEqual(@as(usize, @intFromBool(edge[1] == node)), seen_out);
+            try std.testing.expectEqual(@as(usize, @intFromBool(edge[2] == node)), seen_in);
+        }
+    }
+    try std.testing.expectEqual(edges.len, out_total);
+    try std.testing.expectEqual(edges.len, in_total);
+    // Two traversal keys and one record for each edge, and nothing else but
+    // the id counter the id index keeps under key 0.
+    try std.testing.expectEqual(@as(u64, edges.len * 2), (try db.edge_tree.spaceStats()).entries);
+    try std.testing.expectEqual(@as(u64, edges.len + 1), (try db.edge_id_tree.spaceStats()).entries);
+}
+
+test "a large commit cut short among its sorted traversal keys recovers whole" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_sorted_keys.ltdb";
+    const killed = "/tmp/lattice_crash_sorted_keys_killed.ltdb";
+    defer cleanup(path);
+    defer cleanup(killed);
+
+    const new_edges = 4 * Database.sorted_edge_apply_min;
+    // How many of the transaction's traversal keys reach the file before the
+    // apply fails: none, one, some, all but one. The records never do.
+    for ([_]usize{ 0, 1, new_edges / 2 + 3, new_edges, 2 * new_edges - 1 }) |keys_written| {
+        cleanup(path);
+        cleanup(killed);
+
+        var nodes: [20]NodeId = undefined;
+        // id, source, target of every edge the database should end up with.
+        var edges: std.ArrayListUnmanaged([3]u64) = .empty;
+        defer edges.deinit(allocator);
+        var updated: EdgeId = undefined;
+        var deleted: EdgeId = undefined;
+        {
+            var db = try openCrashTestDb(allocator, path, true);
+            defer db.close();
+
+            var txn = try db.beginTransaction(.read_write);
+            for (&nodes) |*node| node.* = try db.createNode(&txn, &.{"P"});
+            for (0..10) |i| {
+                const source = nodes[i];
+                const target = nodes[(i * 7 + 3) % nodes.len];
+                const id = try db.createEdgeAndGetId(&txn, source, target, "OLD");
+                try edges.append(allocator, .{ id, source, target });
+            }
+            try db.commitTransaction(&txn);
+            // The first transaction is in the file, whole.
+            try db.sync();
+            const keys_before = (try db.edge_tree.spaceStats()).entries;
+
+            txn = try db.beginTransaction(.read_write);
+            updated = edges.items[2][0];
+            try db.setEdgePropertyById(&txn, updated, "w", .{ .int_val = 42 });
+            deleted = edges.orderedRemove(5)[0];
+            try db.deleteEdgeById(&txn, deleted);
+            var state: u64 = keys_written + 1;
+            for (0..new_edges) |i| {
+                state = state *% 6364136223846793005 +% 1442695040888963407;
+                const source = nodes[@intCast((state >> 33) % nodes.len)];
+                state = state *% 6364136223846793005 +% 1442695040888963407;
+                const target = nodes[@intCast((state >> 33) % nodes.len)];
+                const id = try db.createEdgeAndGetId(&txn, source, target, "NEW");
+                if (i % 4 == 0) try db.setEdgePropertyById(&txn, id, "w", .{ .int_val = @intCast(i) });
+                try edges.append(allocator, .{ id, source, target });
+            }
+
+            db.fail_apply_after_edge_keys_for_testing = keys_written;
+            try std.testing.expectError(error.IoError, db.commitTransaction(&txn));
+
+            // The file now holds exactly that many of the new traversal
+            // keys, and not one of the new records: nothing is left dirty in
+            // the pool, and the stores read what was written.
+            try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.dirtyCount());
+            try std.testing.expectEqual(keys_before + keys_written, (try db.edge_tree.spaceStats()).entries);
+            try std.testing.expectError(error.NotFound, db.edge_store.getById(edges.items[edges.items.len - 1][0]));
+            try std.testing.expectError(error.IoError, db.beginTransaction(.read_only));
+
+            copyAsIfKilled(allocator, path, killed) catch |err| return skipIfLockedOnWindows(err);
+        }
+
+        // Killed there, or closed there: the log finishes the transaction.
+        for ([_][]const u8{ killed, path }) |reopened| {
+            var db = try openCrashTestDb(allocator, reopened, false);
+            defer db.close();
+            try expectEdgesOnce(db, allocator, &nodes, edges.items);
+            try std.testing.expectError(error.NotFound, db.edge_store.getById(deleted));
+
+            var changed = try db.edge_store.getById(updated);
+            defer changed.deinit(allocator);
+            try std.testing.expectEqual(@as(usize, 1), changed.properties.len);
+            try std.testing.expectEqual(@as(i64, 42), changed.properties[0].value.int_val);
+
+            var weighted: usize = 0;
+            for (edges.items) |edge| {
+                var stored = try db.edge_store.getById(edge[0]);
+                defer stored.deinit(allocator);
+                try std.testing.expectEqual(edge[1], stored.source);
+                try std.testing.expectEqual(edge[2], stored.target);
+                weighted += stored.properties.len;
+            }
+            try std.testing.expectEqual(@as(usize, 1 + new_edges / 4), weighted);
+
+            // And the database goes on from there.
+            var txn = try db.beginTransaction(.read_write);
+            _ = try db.createEdgeAndGetId(&txn, nodes[0], nodes[1], "AFTER");
+            try db.commitTransaction(&txn);
+        }
+    }
+}
+
+test "a large commit of edges is rebuilt from the log alone" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_sorted_rebuild.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var nodes: [12]NodeId = undefined;
+    var edges: std.ArrayListUnmanaged([3]u64) = .empty;
+    defer edges.deinit(allocator);
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        for (&nodes) |*node| node.* = try db.createNode(&txn, &.{"P"});
+        try db.commitTransaction(&txn);
+
+        txn = try db.beginTransaction(.read_write);
+        for (0..3 * Database.sorted_edge_apply_min) |i| {
+            const source = nodes[i % nodes.len];
+            const target = nodes[(i * 5 + 1) % nodes.len];
+            const id = try db.createEdgeAndGetId(&txn, source, target, "R");
+            try edges.append(allocator, .{ id, source, target });
+        }
+        try db.commitTransaction(&txn);
+    }
+    try simulateCrash(path);
+
+    var db = try openCrashTestDb(allocator, path, false);
+    defer db.close();
+    try expectEdgesOnce(db, allocator, &nodes, edges.items);
+}

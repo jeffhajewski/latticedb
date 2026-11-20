@@ -1284,6 +1284,11 @@ pub const Database = struct {
     /// Test hook: fail the next commit after its commit record is durable,
     /// in place of applying it.
     fail_next_apply_for_testing: bool = false,
+    /// Fail a commit's apply once it has inserted this many of the traversal
+    /// keys `applyNewEdgeKeysSorted` sorts, after writing those keys to the
+    /// file as a full buffer pool would. For tests of recovery from a
+    /// transaction applied in part.
+    fail_apply_after_edge_keys_for_testing: ?usize = null,
     /// Test hook: fail the next commit once its changefeed is staged, before
     /// anything is logged, leaving the transaction open.
     fail_after_changefeed_staging_for_testing: bool = false,
@@ -1816,6 +1821,7 @@ pub const Database = struct {
         self.active_writer_txn_id = null;
         self.failed = false;
         self.fail_next_apply_for_testing = false;
+        self.fail_apply_after_edge_keys_for_testing = null;
         self.fail_after_changefeed_staging_for_testing = false;
         self.stream_epoch = 0;
 
@@ -1906,6 +1912,11 @@ pub const Database = struct {
         if (self.read_only or self.failed) return;
         if (self.buffer_pool.dirtyCount() * 2 < self.buffer_pool.frame_count) return;
         if (self.buffer_pool.hasPinnedFrames()) return;
+        self.flushForBufferPressure();
+    }
+
+    /// The flush `relieveBufferPressure` does once it has decided to.
+    fn flushForBufferPressure(self: *Self) void {
         self.applyChangefeedRetentionWithoutLog() catch return;
 
         // The vector index's node map lives in memory, and the pages it
@@ -3229,15 +3240,19 @@ pub const Database = struct {
             }
         }
 
+        // The traversal keys of the edges a large transaction creates go in
+        // first, in key order; the loop below then writes those edges'
+        // records and applies every other edge as it always has.
+        const keys_first = try self.applyNewEdgeKeysSorted(overlay);
         if (overlay.sortedEdgeIds()) |ids| {
-            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?, overlay.stored_edges.get(edge_id));
+            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?, overlay.stored_edges.get(edge_id), keys_first);
         } else if (sortedKeysAlloc(EdgeId, self.allocator, &overlay.edge_states)) |ids| {
             defer self.allocator.free(ids);
-            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?, overlay.stored_edges.get(edge_id));
+            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?, overlay.stored_edges.get(edge_id), keys_first);
         } else {
             var edge_iter = overlay.edge_states.iterator();
             while (edge_iter.next()) |entry| {
-                try self.applyEdgeState(entry.key_ptr.*, entry.value_ptr.*, overlay.stored_edges.get(entry.key_ptr.*));
+                try self.applyEdgeState(entry.key_ptr.*, entry.value_ptr.*, overlay.stored_edges.get(entry.key_ptr.*), keys_first);
             }
         }
         if (overlay.edge_states.count() > 0) {
@@ -3402,7 +3417,83 @@ pub const Database = struct {
         try self.ftsReplaceNode(node_id, &.{}, &.{}, state.labels, state.properties);
     }
 
-    fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState, current: ?TxnEdgeState) DatabaseError!void {
+    /// How many edges a transaction must create before their traversal keys
+    /// are inserted in key order ahead of everything else (see
+    /// `applyNewEdgeKeysSorted`). Below it the sort buys nothing: so few keys
+    /// land on different pages whatever order they arrive in.
+    pub const sorted_edge_apply_min: usize = 64;
+
+    /// Insert the traversal keys of every edge the transaction creates, in
+    /// key order, when there are enough of them. Returns whether it did;
+    /// `applyEdgeState` must then write only the record of a new edge.
+    ///
+    /// An edge has two traversal keys, one filed under its source and one
+    /// under its target, and they land wherever those nodes are in the tree.
+    /// Applied edge by edge, a transaction's keys reach the tree in an order
+    /// unrelated to where they go, and once the tree is larger than the
+    /// buffer pool nearly every key dirties a page of its own: the pool
+    /// fills with pages changed once, flushes them, and reads them back for
+    /// the next key bound there. In key order, all the keys a page will get
+    /// from this transaction arrive together, so each page is changed and
+    /// written once, however often the pool is flushed along the way.
+    ///
+    /// Between this and the records, the tree holds traversal keys of edges
+    /// that have no record. That state can reach the file, through a flush
+    /// here or a crash, and recovery completes it: the transaction's commit
+    /// record is durable before any of this runs, and replaying an edge puts
+    /// in whichever of its entries are missing (`EdgeStore.ensureWithId`).
+    /// Nothing in this process reads the tree until the commit returns.
+    fn applyNewEdgeKeysSorted(self: *Self, overlay: *TxnOverlay) DatabaseError!bool {
+        var created: usize = 0;
+        var count_iter = overlay.edge_states.iterator();
+        while (count_iter.next()) |entry| {
+            if (entry.value_ptr.exists and !overlay.stored_edges.contains(entry.key_ptr.*)) created += 1;
+        }
+        if (created < sorted_edge_apply_min) return false;
+
+        const Key = [edge_mod.EdgeKey.SIZE]u8;
+        // Without the memory for the keys, the edges are applied one by one.
+        const keys = self.allocator.alloc(Key, created * 2) catch return false;
+        defer self.allocator.free(keys);
+
+        var filled: usize = 0;
+        var iter = overlay.edge_states.iterator();
+        while (iter.next()) |entry| {
+            const state = entry.value_ptr.*;
+            if (!state.exists or overlay.stored_edges.contains(entry.key_ptr.*)) continue;
+            const pair = EdgeStore.traversalKeys(entry.key_ptr.*, state.source, state.target, state.edge_type);
+            keys[filled] = pair[0];
+            keys[filled + 1] = pair[1];
+            filled += 2;
+        }
+        std.debug.assert(filled == keys.len);
+
+        std.mem.sortUnstable(Key, keys, {}, struct {
+            fn lessThan(_: void, a: Key, b: Key) bool {
+                return std.mem.order(u8, &a, &b) == .lt;
+            }
+        }.lessThan);
+
+        for (keys, 0..) |*key, done| {
+            if (self.fail_apply_after_edge_keys_for_testing) |limit| {
+                if (done == limit) {
+                    self.fail_apply_after_edge_keys_for_testing = null;
+                    // What a full buffer pool does at this point on its own:
+                    // write the keys inserted so far to the file.
+                    if (self.wal != null) self.flushForBufferPressure();
+                    return DatabaseError.IoError;
+                }
+            }
+            self.relieveApplyPressure();
+            self.edge_store.insertTraversalKey(key) catch |err| return mapEdgeStoreError(err);
+        }
+        return true;
+    }
+
+    /// Apply one edge of a committed transaction. `keys_first` says the
+    /// traversal keys of the edges this transaction creates are in the tree
+    /// already (`applyNewEdgeKeysSorted`).
+    fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState, current: ?TxnEdgeState, keys_first: bool) DatabaseError!void {
         self.relieveApplyPressure();
 
         if (!state.exists) {
@@ -3446,9 +3537,15 @@ pub const Database = struct {
                 self.forgetCachedAdjacency(existing.source);
             }
 
-            self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
-                return mapEdgeStoreError(err);
-            };
+            if (keys_first and current == null) {
+                self.edge_store.createRecordWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
+                    return mapEdgeStoreError(err);
+                };
+            } else {
+                self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
+                    return mapEdgeStoreError(err);
+                };
+            }
             self.forgetCachedAdjacency(state.source);
         }
         if (self.property_index) |*index| {

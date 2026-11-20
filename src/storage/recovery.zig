@@ -560,9 +560,16 @@ pub const RecoveryManager = struct {
     }
 
     /// Make the edge exist with exactly these endpoints, type and properties.
-    fn putEdge(ctx: LogicalRecoveryContext, edge_id: u64, exists: bool, source: u64, target: u64, edge_type: symbols_mod.SymbolId, properties: []const node_mod.Property) RecoveryError!void {
-        if (exists) ctx.edge_store.deleteById(edge_id) catch return RecoveryError.IoError;
-        ctx.edge_store.createWithId(edge_id, source, target, edge_type, properties) catch return RecoveryError.IoError;
+    ///
+    /// The file may hold the edge whole, not at all, or in part: a commit
+    /// that creates many edges writes their traversal keys before their
+    /// records, and a flush or a crash in between leaves keys without a
+    /// record. `ensureWithId` fills in whatever is missing.
+    fn putEdge(ctx: LogicalRecoveryContext, edge_id: u64, source: u64, target: u64, edge_type: symbols_mod.SymbolId, properties: []const node_mod.Property) RecoveryError!void {
+        ctx.edge_store.ensureWithId(edge_id, source, target, edge_type, properties) catch |err| return switch (err) {
+            error.OutOfMemory => RecoveryError.OutOfMemory,
+            else => RecoveryError.IoError,
+        };
     }
 
     fn redoNodeInsert(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
@@ -649,10 +656,7 @@ pub const RecoveryManager = struct {
         _ = self;
         const p = wal_payload.deserializeEdgeInsert(payload) catch return RecoveryError.InvalidRecord;
         const type_id = ctx.symbol_table.intern(p.edge_type) catch return RecoveryError.IoError;
-        var existing = try getEdge(ctx, p.edge_id);
-        const exists = existing != null;
-        if (existing) |*edge| edge.deinit(ctx.edge_store.allocator);
-        try putEdge(ctx, p.edge_id, exists, p.source, p.target, type_id, &.{});
+        try putEdge(ctx, p.edge_id, p.source, p.target, type_id, &.{});
     }
 
     fn redoEdgeDelete(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
@@ -686,7 +690,7 @@ pub const RecoveryManager = struct {
                 return;
             }
         }
-        try putEdge(ctx, p.edge_id, existing != null, p.source, p.target, p.type_id, @ptrCast(properties));
+        try putEdge(ctx, p.edge_id, p.source, p.target, p.type_id, @ptrCast(properties));
     }
 
     fn redoEdgeProperty(self: *Self, ctx: LogicalRecoveryContext, deletes: *const Deletes, lsn: u64, payload: []const u8) RecoveryError!void {

@@ -9,6 +9,7 @@ const Database = lattice.storage.database.Database;
 const EdgeRef = lattice.storage.database.EdgeRef;
 const NodeId = lattice.core.types.NodeId;
 const EdgeId = lattice.core.types.EdgeId;
+const IdKeyOrder = lattice.core.id_key.IdKeyOrder;
 
 const allocator = std.testing.allocator;
 const threshold = Database.sorted_edge_apply_min;
@@ -24,10 +25,16 @@ fn removeFiles(path: []const u8) void {
 }
 
 fn openDb(path: []const u8, create: bool, wal: bool) !*Database {
+    return openDbWithKeys(path, create, wal, .big);
+}
+
+/// `id_keys` is the layout of a file this creates; an existing file keeps
+/// its own.
+fn openDbWithKeys(path: []const u8, create: bool, wal: bool, id_keys: IdKeyOrder) !*Database {
     if (create) removeFiles(path);
     return Database.open(allocator, path, .{
         .create = create,
-        .config = .{ .enable_wal = wal, .enable_fts = false, .enable_vector = false },
+        .config = .{ .enable_wal = wal, .enable_fts = false, .enable_vector = false, .new_database_id_keys = id_keys },
     });
 }
 
@@ -124,24 +131,30 @@ test "lbl: edges created on either side of the sorting threshold come out the sa
     const path = "/tmp/lbl_threshold.ltdb";
     defer removeFiles(path);
 
-    for ([_]usize{ 1, threshold - 1, threshold, threshold + 1, 5 * threshold }) |count| {
-        var expected: std.ArrayListUnmanaged(Expected) = .empty;
-        defer expected.deinit(allocator);
-        var nodes: [24]NodeId = undefined;
-        {
-            var db = try openDb(path, true, true);
-            defer db.close();
-            nodes = try createNodes(db, 24);
+    // Both layouts of the edge id index: a format-5 file, and one laid out
+    // as earlier releases created them.
+    for ([_]IdKeyOrder{ .big, .little }) |id_keys| {
+        for ([_]usize{ 1, threshold - 1, threshold, threshold + 1, 5 * threshold }) |count| {
+            var expected: std.ArrayListUnmanaged(Expected) = .empty;
+            defer expected.deinit(allocator);
+            var nodes: [24]NodeId = undefined;
+            {
+                var db = try openDbWithKeys(path, true, true, id_keys);
+                defer db.close();
+                try std.testing.expectEqual(id_keys, db.id_key_order);
+                nodes = try createNodes(db, 24);
 
-            var rng = Lcg{ .state = count };
-            var txn = try db.beginTransaction(.read_write);
-            try createEdges(db, &txn, &nodes, count, &rng, &expected);
-            try db.commitTransaction(&txn);
+                var rng = Lcg{ .state = count };
+                var txn = try db.beginTransaction(.read_write);
+                try createEdges(db, &txn, &nodes, count, &rng, &expected);
+                try db.commitTransaction(&txn);
+                try expectGraph(db, &nodes, expected.items);
+            }
+            var db = try openDb(path, false, true);
+            defer db.close();
+            try std.testing.expectEqual(id_keys, db.id_key_order);
             try expectGraph(db, &nodes, expected.items);
         }
-        var db = try openDb(path, false, true);
-        defer db.close();
-        try expectGraph(db, &nodes, expected.items);
     }
 }
 

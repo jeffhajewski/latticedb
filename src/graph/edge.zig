@@ -2487,3 +2487,107 @@ test "deserializeEdge frees exactly what it decoded when it fails part way" {
         break;
     }
 }
+
+test "ensureWithId completes an edge from whichever of its entries are there" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_ensure_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    for ([_]IdKeyOrder{ .little, .big }) |order| {
+        // A pair of trees for each order: an edge id index is in one order
+        // or the other, never both.
+        var tree = try BTree.init(allocator, &bp);
+        var edge_id_tree = try BTree.init(allocator, &bp);
+        var store = EdgeStore.init(allocator, &tree, &edge_id_tree, order);
+        const edge_type: SymbolId = 1000;
+        const weight = [_]Property{.{ .key_id = 2000, .value = .{ .int_val = 7 } }};
+
+        const Check = struct {
+            fn whole(s: *EdgeStore, id: EdgeId, source: NodeId, target: NodeId, kind: SymbolId, properties: usize) !void {
+                var edge = try s.getById(id);
+                defer edge.deinit(std.testing.allocator);
+                try std.testing.expectEqual(source, edge.source);
+                try std.testing.expectEqual(target, edge.target);
+                try std.testing.expectEqual(kind, edge.edge_type);
+                try std.testing.expectEqual(properties, edge.properties.len);
+                const keys = EdgeStore.traversalKeys(id, source, target, kind);
+                try std.testing.expect(try s.tree.contains(&keys[0]));
+                try std.testing.expect(try s.tree.contains(&keys[1]));
+            }
+        };
+
+        // Nothing there: the edge is created.
+        const base: EdgeId = 300;
+        try store.ensureWithId(base + 1, 1, 2, edge_type, &weight);
+        try Check.whole(&store, base + 1, 1, 2, edge_type, 1);
+        try std.testing.expect(store.next_edge_id > base + 1);
+
+        // All there: nothing is duplicated, and the record is replaced.
+        try store.ensureWithId(base + 1, 1, 2, edge_type, &.{});
+        try Check.whole(&store, base + 1, 1, 2, edge_type, 0);
+
+        // Only the traversal keys, as a large commit leaves them before it
+        // writes the records.
+        const ahead = EdgeStore.traversalKeys(base + 2, 3, 4, edge_type);
+        try store.insertTraversalKey(&ahead[0]);
+        try store.insertTraversalKey(&ahead[1]);
+        try std.testing.expectError(EdgeError.NotFound, store.getById(base + 2));
+        try store.ensureWithId(base + 2, 3, 4, edge_type, &weight);
+        try Check.whole(&store, base + 2, 3, 4, edge_type, 1);
+
+        // One traversal key of the two.
+        const half = EdgeStore.traversalKeys(base + 3, 5, 6, edge_type);
+        try store.insertTraversalKey(&half[1]);
+        try store.ensureWithId(base + 3, 5, 6, edge_type, &.{});
+        try Check.whole(&store, base + 3, 5, 6, edge_type, 0);
+
+        // Only the record.
+        try store.createRecordWithId(base + 4, 7, 8, edge_type, &.{});
+        try store.ensureWithId(base + 4, 7, 8, edge_type, &.{});
+        try Check.whole(&store, base + 4, 7, 8, edge_type, 0);
+
+        // A record that names other endpoints: its keys go, the new ones
+        // come.
+        try store.ensureWithId(base + 4, 9, 8, edge_type + 1, &.{});
+        try Check.whole(&store, base + 4, 9, 8, edge_type + 1, 0);
+        const stale = EdgeStore.traversalKeys(base + 4, 7, 8, edge_type);
+        try std.testing.expect(!try store.tree.contains(&stale[0]));
+        try std.testing.expect(!try store.tree.contains(&stale[1]));
+
+        // Each edge is found once from each end. The iterator holds a page
+        // of the tree, so it is closed before anything is inserted again.
+        {
+            var out = try store.getOutgoing(3);
+            defer out.deinit();
+            var count: usize = 0;
+            while (try out.next()) |edge| {
+                var e = edge;
+                e.deinit(allocator);
+                count += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), count);
+        }
+
+        // A key that is already there is a duplicate to a commit, which
+        // creates edges it knows are new.
+        try std.testing.expectError(EdgeError.AlreadyExists, store.insertTraversalKey(&ahead[0]));
+        try std.testing.expectError(EdgeError.AlreadyExists, store.createRecordWithId(base + 2, 3, 4, edge_type, &.{}));
+    }
+}

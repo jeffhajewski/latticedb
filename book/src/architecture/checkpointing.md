@@ -263,7 +263,7 @@ and the bindings gives 3,200 frames; the Zig API's 28 MB default and an in-memor
 database's small fixed pool give 1000; 512 MB or more gives 16,384. The reason is
 the cost of a checkpoint: it writes every page dirtied since the last one twice and
 syncs, and with a 1 GB cache a bulk load of 1M nodes and 2M relationships took
-12.1 s at 1000 frames and 8.6 s at 64 MB. The cap bounds what a crash leaves to
+12.8 s at 1000 frames and 9.2 s at 64 MB. The cap bounds what a crash leaves to
 replay and the size of the `-wal` file. A number set in `max_wal_frames`, or through
 any of the setters below, is used as it is. `Database.autoCheckpoint()` returns the
 policy with the frame count filled in, so it says what the default came to.

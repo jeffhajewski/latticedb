@@ -175,6 +175,26 @@ holds changes, it runs, in order:
    pool is dirty and nothing is pinned, and wake stream readers if streams changed.
 7. Run an automatic checkpoint if the WAL has reached its threshold (best effort).
 
+Step 5 does not go edge by edge when a transaction creates many of them. An edge
+has two traversal keys, one filed under its source and one under its target, and
+they belong wherever those two nodes sit in the edge tree. Taken edge by edge, a
+transaction's keys reach the tree in an order that has nothing to do with where
+they go. Once the tree is larger than the buffer pool nearly every key dirties a
+page of its own, the pool fills with pages changed once, and each early flush
+writes them all, twice, only for later keys to change them again. So a commit
+that creates 64 or more edges (`Database.sorted_edge_apply_min`) first builds the
+traversal keys of all of them, sorts them, and inserts them in key order; the
+edge records, and everything else, follow in id order as before. Each page of
+the edge tree then gets all its new keys while it is in memory and is written
+once, however often the pool is flushed along the way. Between the keys and the
+records the tree holds traversal keys of edges that have no record yet. Nothing
+reads the stores in that window, since the commit holds the database, but an
+early flush or a crash can leave it in the file, and
+[recovery](./recovery.md#replaying-twice-is-safe) completes such an edge from
+the log. The sort costs 27 bytes of memory per key, two keys per created edge,
+for the length of step 5; if that memory is not there the commit applies edge by
+edge instead.
+
 Steps 1, 2, 3 and 5 all compare each changed node and edge with what the store
 holds for it. That is read once, before step 1, in id order, and kept on the
 overlay until it is discarded; the store cannot change in between, since only the

@@ -154,52 +154,71 @@ of any transaction, so it does not appear in the changefeed.
 
 ### Bulk loading
 
-A load you can run again from its source does not need the log: if it is
-interrupted, delete the file and start over. For such a load:
+Three things decide how long a large load takes, in this order: how many rows go
+into each transaction, how large the page cache is, and whether the load needs the
+log at all.
+
+**Use large transactions for relationships.** A relationship is filed twice in
+the edge tree, once under each of its two nodes, and those two places are wherever
+the nodes' other relationships are. Relationships between arbitrary nodes
+therefore touch pages all over the tree. A commit that creates 64 or more
+relationships sorts all their entries first and inserts them in order, so each
+page gets everything the transaction has for it in one visit and is written once.
+The more relationships one transaction holds, the more of them share a page: with
+2,000,000 relationships over 1,000,000 nodes the edge tree ends with about 50,000
+leaf pages, so a transaction of 10,000 relationships puts about one entry on each
+page it touches and a transaction of 100,000 about four.
+A transaction keeps its changes in memory until it commits, 600 to 700 bytes per
+row in this load (a relationship without properties), so 100,000 rows cost some
+70 MB and 1,000,000 about 560 MB on top of the cache.
+
+**Give it cache.** A flush writes each changed page twice, once to the journal
+and once in place, and happens whenever half the cache holds changes. With a small
+cache and writes spread over the whole graph, the same pages are changed and
+written again flush after flush; once half the cache holds what the load changes,
+each page is written about twice in all. The log follows the cache: by default
+it may grow to an eighth of it before a checkpoint (see
+[Why the interval follows the cache](#why-the-interval-follows-the-cache)).
+
+**Drop the log if the load can be run again.** A load you can repeat from its
+source does not need the log: if it is interrupted, delete the file and start
+over. For such a load:
 
 - open with `enable_wal = false`;
 - set `changefeed_retention` to `off` if nothing will read the load's changes
   from the changefeed (the policy is kept in the file; open with `all` afterwards
   to record changes from then on);
 - give it a page cache about twice the size the file will reach;
-- write in transactions of some thousands of rows, then close (or, in Zig,
-  `sync()`).
+- then close (or, in Zig, `sync()`).
 
-The cache matters more than the log. A flush writes each changed page twice, once
-to the journal and once in place, and happens whenever half the cache holds
-changes. With a small cache and writes spread over the whole graph, the same pages
-are changed and written again flush after flush; once half the cache holds what the
-load changes, each page is written about twice in all.
+Loading 1,000,000 nodes and 2,000,000 relationships between random pairs of them
+through the C API (ReleaseFast, Apple M5, a new format-5 file, the median of three
+runs; "defaults" are the log on with `full` sync, the changefeed keeping every
+event, and a 100 MB cache):
 
-Loading 1,000,000 nodes and 2,000,000 relationships between random pairs of them,
-through the Zig API in transactions of 10,000 (release build, a busy macOS machine,
-two runs each; the Zig API's default cache here is 28 MB, the bindings' 100 MB):
+| Settings | Rows per transaction | Time | Written to disk | File | 0.18.1 |
+|----------|---------------------:|-----:|----------------:|-----:|-------:|
+| Defaults | 1,000 | 28.6 s | 29 GB | 452 MB | 37.9 s |
+| Defaults | 10,000 | 23.4 s | 25 GB | 451 MB | 35.9 s |
+| Defaults | 100,000 | 11.3 s | 5.2 GB | 461 MB | 33.6 s |
+| Defaults | 1,000,000 | 8.7 s | 1.9 GB | 458 MB | |
+| 1 GB cache | 10,000 | 9.3 s | 2.4 GB | 451 MB | 16.7 s |
+| 1 GB cache | 100,000 | 8.6 s | 2.2 GB | 461 MB | |
+| No log, changefeed off, 1 GB cache | 10,000 | 6.4 s | 0.9 GB | 315 MB | 8.2 s |
+| No log, changefeed off, 1 GB cache | 100,000 | 5.9 s | 1.0 GB | 326 MB | |
 
-| Log | Changefeed | Cache | Time | Written to disk | File |
-|-----|------------|-------|------|-----------------|------|
-| on, `normal` sync | `all` | default | 75–76 s | 66 GB | 540 MB |
-| off | `all` | default | 39–41 s | 33 GB | 540 MB |
-| off | `off` | default | 36–38 s | 33 GB | 378 MB |
-| on, `normal` sync | `all` | 256 MB | 27–29 s | 20 GB | 540 MB |
-| off | `all` | 256 MB | 21–23 s | 13 GB | 540 MB |
-| on, `normal` sync | `all` | 1 GB | 22–25 s | 13 GB | 540 MB |
-| on, `normal` sync | `off` | 1 GB | 16–17 s | 10 GB | 378 MB |
-| off | `all` | 1 GB | 13–15 s | 2.1 GB | 540 MB |
-| off | `off` | 1 GB | 9–10 s | 1.1 GB | 378 MB |
+The last column is 0.18.1 on the same machine with the same program, where it was
+measured; its file was 500 MB with the defaults and 364 MB without the changefeed.
+0.18.1 gained nothing from larger transactions. Peak memory was the cache plus what
+the open transaction held: 130 MB at 10,000 rows with the default cache, 190 MB at
+100,000 and 680 MB at 1,000,000.
 
-Peak memory was the cache plus 25 to 80 MB. With the log off, the
-changefeed off and a 1 GB cache, transactions cost no more than the same load
-written directly with a `null` transaction (10–11 s), and they still roll back.
+With the default cache and 10,000 rows or fewer, most of the time still goes to
+writing the same pages again: 25 GB written for a 450 MB file. If the transactions
+cannot be larger, a larger cache does the same job.
 
-The rows with the log on were measured when a commit checkpointed every 1,000 log
-frames whatever the cache. The default interval now grows with the cache, which
-helps most in the 1 GB rows: see
-[Why the interval follows the cache](#why-the-interval-follows-the-cache).
-
-The published figures for this load are measured through the C API on a quiet
-machine, where the default cache is 100 MB and the default sync mode `full`:
-34.4 s with the defaults and 7.9 s with the last row's settings. See
-[Benchmarks](../performance/benchmarks.md#bulk-load).
+The figures on the [Benchmarks](../performance/benchmarks.md#bulk-load) page are
+from 0.17.0 and are replaced when that page is next measured as a whole.
 
 ## Checkpointing
 
@@ -270,11 +289,14 @@ replication: see [Backup and Replication](../guides/backup-and-replication.md).
 A checkpoint writes every page dirtied since the last one twice, once into the
 journal and once in place, and syncs. With a large cache, checkpointing every
 4 MB of log throws away what the cache could hold. A bulk load of a million nodes
-and two million relationships, 10,000 rows per transaction, took 12.1 s with a 1 GB
-cache and the old fixed 1,000 frames, and 8.6 s with 64 MB of log. With the 100 MB
-cache the interval made no measurable difference: there the flush that runs when
-half the cache is dirty does most of the writing. The 64 MB cap bounds how much log
-a crash leaves to replay and how large the `-wal` file grows.
+and two million relationships, 10,000 rows per transaction, took 12.8 s with a 1 GB
+cache and the old fixed 1,000 frames, and 9.2 s with 64 MB of log (8.5 GB written
+against 2.4 GB). With the 100 MB cache the interval made no measurable difference:
+there the flush that runs when half the cache is dirty does most of the writing.
+The 64 MB cap bounds how much log a crash leaves to replay and how large the `-wal`
+file grows. Replay is what the larger log costs. The same load killed with 60 MB in
+the log took 2.0 s to open again; killed with 11 MB in the log (the 100 MB cache's
+limit) it took 0.4 s, and with the old 4 MB, 0.2 to 0.4 s.
 
 To get the old fixed interval back, set it to 1,000 frames: with
 `LATTICE_AUTO_CHECKPOINT_FRAMES=1000`, `--auto-checkpoint=1000`, or 1000 in any of

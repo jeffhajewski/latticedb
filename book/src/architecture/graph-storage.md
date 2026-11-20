@@ -110,8 +110,9 @@ every insert dirtied a different page.
 Format 5 writes those ids **big-endian**. Byte order is now id order, new ids
 append at the right edge, and the B+Tree's in-order split keeps the leaves
 full. On the same load the two trees ended 99% full (node tree 70.6 → 51.9 MB,
-edge-ID index 100 → 69 MB), the default load went from about 35 s to 27 s,
-and a load without the log from 8 s to 6.3 s.
+edge-ID index 100 → 69 MB). Measured with that change alone, before the
+others in the same release, the default load went from about 35 s to 27 s and a
+load without the log from 8 s to 6.3 s.
 
 The order is a property of the file, chosen when it is created and never
 changed. A file created in format 5 sets `FileFlags.ORDERED_ID_KEYS` in its
@@ -261,6 +262,18 @@ rewrites only its payload entry (`EdgeStore.replaceProperties`, one B+Tree
 writes, for an undo and for a replayed log record. Setting one property on each
 of 20,000 edges in one transaction went from about 6.6 µs to 3.6 µs an edge,
 commit included.
+
+An edge is created as those three entries together, with one exception. A commit
+that creates 64 or more edges inserts the traversal keys of all of them first, in
+key order, and the payload entries after, so that each page of the traversal tree
+is changed once instead of once per edge that touches it (see
+[the order of a commit](./transaction-manager.md#3-commit)). If that commit is
+interrupted, the file can hold traversal keys whose payload entry is missing;
+[recovery](./recovery.md#replaying-twice-is-safe) adds whatever an edge lacks.
+The traversal keys of a relationship between two nodes land near those nodes'
+other relationships, which are anywhere in the tree, so a load that creates
+relationships between arbitrary nodes gets faster the more of them one
+transaction holds: see [Bulk loading](../configuration/durability.md#bulk-loading).
 
 ### Edge-ID Index
 

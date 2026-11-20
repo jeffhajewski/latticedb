@@ -8,6 +8,10 @@ Use this file as the draft for the next release after `0.18.1`.
   which makes loading faster and the file smaller. **0.18.x and earlier cannot
   open a database this release creates.** Existing databases are not changed
   and stay readable by the releases that could read them before.
+- A commit that creates many relationships files them in key order, so a bulk
+  load gets faster the larger its transactions are: 1M nodes and 2M
+  relationships with the default settings load in 11.3 s at 100,000 rows per
+  transaction, where 0.18.1 took 33.6 s.
 - The automatic checkpoint interval now follows the page cache. With a large
   cache the log can grow to 64 MB before a commit checkpoints, instead of 4 MB,
   and bulk loads with the log on get faster.
@@ -21,10 +25,42 @@ Use this file as the draft for the next release after `0.18.1`.
   scattered across the whole tree: every insert dirtied a different leaf, and
   the trees ended about 70% full. Format 5 writes these keys big-endian. New
   ids append at the right edge and the leaves fill. On a load of 1,000,000
-  nodes and 2,000,000 relationships, measured with a prototype of the change:
+  nodes and 2,000,000 relationships, measured with a prototype of this change
+  alone:
   the default load went from about 35 s to 27 s, a load without the log from
   8 s to 6.3 s, the node tree from 70.6 MB to 51.9 MB and the edge-ID index from
   100 MB to 69 MB (both 99% full, from 73% and 69%).
+- **Large transactions load relationships much faster.** A relationship has two
+  entries in the edge tree, one under each of its nodes, and they belong wherever
+  those nodes' other relationships are. Applied one relationship at a time, a
+  transaction's entries reached the tree in an order unrelated to where they go:
+  once the tree outgrew the cache nearly every entry dirtied a page of its own,
+  and each flush wrote all those pages (twice) only for the next entries to
+  change them again. 0.18.1 wrote 37 GB to build a 500 MB file. A commit that
+  creates 64 or more relationships now sorts all their entries and inserts them
+  in order, then writes the relationship records. Each page gets everything the
+  transaction has for it in one visit. The gain grows with the transaction: at
+  10,000 relationships a transaction has about one entry per page it touches,
+  at 100,000 about four. See the table below and
+  [Bulk loading](../book/src/configuration/durability.md#bulk-loading).
+- **Bulk load, all three changes together.** 1,000,000 nodes and 2,000,000
+  relationships between random pairs, through the C API, median of three runs
+  on an Apple M5; defaults are the log on with `full` sync, the changefeed on
+  and a 100 MB cache:
+
+  | Settings | Rows per transaction | 0.18.1 | This release | Written (0.18.1 → now) |
+  |----------|---------------------:|-------:|-------------:|-----------------------:|
+  | Defaults | 1,000 | 37.9 s | 28.6 s | 39 → 29 GB |
+  | Defaults | 10,000 | 35.9 s | 23.4 s | 38 → 25 GB |
+  | Defaults | 100,000 | 33.6 s | 11.3 s | 37 → 5.2 GB |
+  | Defaults | 1,000,000 | | 8.7 s | 1.9 GB |
+  | 1 GB cache | 10,000 | 16.7 s | 9.3 s | 12.9 → 2.4 GB |
+  | No log, changefeed off, 1 GB cache | 10,000 | 8.2 s | 6.4 s | 1.1 → 0.9 GB |
+
+  The file is 451 to 461 MB with the defaults (0.18.1: 500 MB). SQLite, loading
+  the same rows into two tables with an index on each end of the relationship,
+  WAL mode, `synchronous=FULL` and a 100 MB cache, took 8.7 s at 10,000 rows per
+  transaction and 3.4 s at 100,000, with a 117 MB file.
 - **Fewer checkpoints with a large cache.** A commit used to run a checkpoint
   every 1,000 log frames (4 MB), whatever the cache. A checkpoint writes every
   page changed since the last one twice and syncs, so a large cache was flushed
@@ -32,8 +68,8 @@ Use this file as the draft for the next release after `0.18.1`.
   page cache, never less than 1,000 frames and never more than 64 MB: 3,200
   frames (12.5 MB) with the 100 MB cache of the C API and the bindings, 2,048 with
   the CLI's 64 MB, and 16,384 (64 MB) with 512 MB or more. Loading 1M nodes and
-  2M relationships, 10,000 rows per transaction with the log on, took 12.1 s with
-  a 1 GB cache before and 8.6 s now. With the 100 MB default cache the time does
+  2M relationships, 10,000 rows per transaction with the log on, took 12.8 s with
+  a 1 GB cache at the old interval and 9.2 s at the new one. With the 100 MB default cache the time does
   not change measurably: there the flush that runs when half the cache is dirty
   does most of the writing.
 
@@ -89,9 +125,24 @@ Use this file as the draft for the next release after `0.18.1`.
   older files open to 0.17 and 0.18.
 - No converter yet: an existing database keeps the old layout until it is
   exported and imported into a new one.
+- **Recover a crashed database with this release, not an older one.** A large
+  commit now writes all of its relationships' tree entries before their records,
+  and a crash in between can leave entries without a record in the file. This
+  release's recovery completes them from the log. Recovery in 0.18.1 and
+  earlier expects every relationship to be whole or absent and fails on one
+  that is neither. It only matters for a database in the old layout (created
+  by 0.18 or earlier, or with `new_database_id_keys = .little`) that crashed
+  under this release during a commit of 64 or more new relationships: 0.17 and
+  0.18 can open such a file only read-only, and that open fails with an I/O
+  error until this release has opened it once. The file is not changed by the
+  failed open.
+- For loads, prefer large transactions (100,000 relationships or more) over
+  many small ones; a transaction holds 600 to 700 bytes of memory per row until
+  it commits.
 - With a cache above about 31 MB the `-wal` file can now grow larger before a
   commit empties it (up to 64 MB), and a crash can leave that much log to replay
-  at the next open. To keep the old interval, set it to 1,000 frames:
+  at the next open: about 2 s for a full 64 MB of bulk-load log, against 0.2 to
+  0.4 s for the old 4 MB. To keep the old interval, set it to 1,000 frames:
   `LATTICE_AUTO_CHECKPOINT_FRAMES=1000`, `--auto-checkpoint=1000`,
   `lattice_set_auto_checkpoint(db, 1000, 0)`, a binding's
   `set_auto_checkpoint(1000)` / `setAutoCheckpoint(1000)` /
@@ -105,6 +156,18 @@ Use this file as the draft for the next release after `0.18.1`.
   and a small cache, 250 frames (4 MB) where it used to be 1,000 (16 MB).
 
 ## Validation Notes
+
+- The sorted apply is held to the edge-by-edge one: transactions on either side
+  of the 64-relationship threshold, in both file layouts, must leave the same
+  records, the same relationships from each end of every node, and exactly two
+  tree entries and one record per relationship, before and after a reopen;
+  likewise a large transaction that also updates and deletes relationships, one
+  without a log, one rolled back, and one committed past an open reader.
+- A crash test stops a large commit after 0, 1, half, all and all but one of
+  its sorted entries have been flushed to the file, and requires recovery to
+  bring back every relationship exactly once, from a copy taken as if the
+  process had been killed and from the file after a clean close. With the old
+  recovery code put back, that test fails and the other 82 pass.
 
 - New tests cover both layouts: id key encoding and order, scans of a
   format-5 file in ascending order with its id trees over 90% full, a

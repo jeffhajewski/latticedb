@@ -148,9 +148,17 @@ the value the search measured. See [Vector Search in Cypher](../cypher/vector-se
 Every committed change is also recorded in the changefeed, which by default keeps
 every event and can make up most of a file. A database nothing reads the history
 of can keep less, or none (`changefeed_retention`); see
-[The Changefeed](./changefeed.md). A load you can rerun from its source can also
-run without the log and with a large cache; see
-[Bulk loading](../configuration/durability.md#bulk-loading).
+[The Changefeed](./changefeed.md).
+
+Create relationships in large transactions: 100,000 rows or more each if memory
+allows (a row costs 600 to 700 bytes of memory until it commits). A commit sorts the
+relationships it creates before it files them, and the more it has, the fewer
+times each page of the file is written. On a load of 1M nodes and 2M
+relationships with the default settings, going from 10,000 to 100,000 rows per
+transaction halves the time. A load you can rerun from its source can also run
+without the log and with a large cache. See
+[Bulk loading](../configuration/durability.md#bulk-loading) for all three and
+the measurements.
 
 ## Transaction Scope
 

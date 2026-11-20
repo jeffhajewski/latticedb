@@ -274,8 +274,8 @@ pub const AutoCheckpointConfig = struct {
     /// A checkpoint writes every page dirtied since the last one twice (into
     /// the journal, then in place) and syncs, so checkpointing often throws
     /// away what a large page cache could hold. A bulk load of 1M nodes and
-    /// 2M relationships, 10K rows per transaction, took 12.1 s with a 1 GB
-    /// cache at the old fixed 1000 frames (4 MB of log) and 8.6 s at 64 MB of
+    /// 2M relationships, 10K rows per transaction, took 12.8 s with a 1 GB
+    /// cache at the old fixed 1000 frames (4 MB of log) and 9.2 s at 64 MB of
     /// log. With the 100 MB default cache the interval made no measurable
     /// difference, since the flush that runs when half the cache is dirty
     /// dominates there. So the log may grow to an eighth of the cache:

@@ -306,7 +306,7 @@ never as a change to whatever is there:
 | node insert | the node exists with exactly the logged labels, their label-index entries, and no properties (its property records follow it in the log) |
 | property set or removal, label add or remove | exactly that key or label, and its label-index entry, is set or cleared |
 | node or edge delete | the node or edge is absent |
-| edge insert | the edge exists with exactly the logged endpoints and type, and no properties |
+| edge insert | the edge exists with exactly the logged endpoints and type, and no properties: its record and both of its traversal keys, each put in place if it is missing and left alone if it is there |
 
 Replaying one onto a state that already has it changes nothing. Replaying an older
 record onto a newer state can change something, but the later record is in the log
@@ -314,6 +314,22 @@ after it and is replayed after it, and the image never runs ahead of the log, si
 the log is synced before every flush. A record that finds its node or edge missing is
 accepted only when a later committed record in the same log deletes it, which means
 the file is from after that delete.
+
+An edge is three entries in two trees, a record and two traversal keys, and
+recovery does not assume it finds all of them or none. A commit that creates many
+edges inserts every traversal key before any record (see
+[the order of a commit](./transaction-manager.md#3-commit)), so a flush in the
+middle of it writes keys whose records do not exist yet, and a crash then leaves
+them in the file. Replay looks for each of the three and adds what is missing
+(`EdgeStore.ensureWithId`). If a record is there under the same id with other
+endpoints or another type, its traversal keys are removed first, whichever of
+them exist. Up to 0.18.1 the redo of an edge was "delete it if its record exists,
+then create it", which fails on a traversal key without a record; those releases
+never wrote such a file, so they never met one. A file that a newer release left
+in that state has to be recovered by the newer release. It is rare for an older
+one to be asked: 0.18 cannot open a format-5 file at all, and can open an older
+file this release has written only read-only, where its replay runs on an
+in-memory overlay, fails with `IoError`, and leaves the file as it was.
 
 The vector index needed an exception. Inserting a vector the index already holds is
 a replacement, which unlinks the node from its neighbours and links it again, and

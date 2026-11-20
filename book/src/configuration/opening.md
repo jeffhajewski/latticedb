@@ -156,7 +156,7 @@ what a crash leaves and what it saves.
 | `enable_wal` | on | Write-ahead logging: a commit survives a crash as soon as it returns. Off, commits survive from the next flush. |
 | `sync_mode` | `.full` | Whether a commit waits for its log record to reach the disk. `.normal` survives a killed process but can lose the latest commits to a power cut. When the program leaves it unset, `LATTICE_SYNC_MODE` applies. |
 | `full_fsync` | off | On macOS, sync with `F_FULLFSYNC` so commits survive power loss, at several milliseconds per sync. When the program leaves it unset, `LATTICE_FULL_FSYNC` applies. |
-| `auto_checkpoint` | every 1000 log frames, truncating | How often the log is folded back into the database file. An open option in Zig; elsewhere `lattice_set_auto_checkpoint`, each binding's `set_auto_checkpoint`/`setAutoCheckpoint`/`SetAutoCheckpoint`, `--auto-checkpoint` or `LATTICE_AUTO_CHECKPOINT_FRAMES`. |
+| `auto_checkpoint` | once the log reaches an eighth of the page cache (1000 frames to 64 MB), truncating | How often the log is folded back into the database file. An open option in Zig; elsewhere `lattice_set_auto_checkpoint`, each binding's `set_auto_checkpoint`/`setAutoCheckpoint`/`SetAutoCheckpoint`, `--auto-checkpoint` or `LATTICE_AUTO_CHECKPOINT_FRAMES`. |
 
 [Durability and the Log](./durability.md) explains each of these and what survives
 what.

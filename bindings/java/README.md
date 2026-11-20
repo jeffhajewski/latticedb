@@ -126,9 +126,11 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   what `FULL` does and then empties the log, the only mode that bounds its size.
   A read-only database throws `ErrorCode.READ_ONLY`, and a transaction that
   already has records in the log `ErrorCode.LOCK_TIMEOUT`. By default a commit
-  checkpoints once the log holds 1000 frames (one frame per page, 4096 bytes);
-  the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets another default
-  (`0` for none), and `setAutoCheckpoint(maxWalFrames, minIntervalMs)` wins over
+  checkpoints once the log reaches an eighth of the page cache, never less than
+  1000 frames (one frame per page, 4096 bytes) and never more than 64 MB: 3,200
+  frames with the default 100 MB cache, 16,384 with 512 MB or more. The
+  `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets a fixed frame count
+  instead (`0` for none), and `setAutoCheckpoint(maxWalFrames, minIntervalMs)` wins over
   it from then on: a commit checkpoints once the log holds `maxWalFrames` frames
   and no sooner than `minIntervalMs` after the last automatic one; 0 frames
   switches automatic checkpoints off, and `close` still folds the log into the

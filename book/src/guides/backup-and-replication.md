@@ -92,8 +92,9 @@ database open and replicates through its own handle (below).
 ### Generations
 
 Every so often LatticeDB folds pending changes into the database file and starts
-the log over. By default this happens once the log reaches a thousand frames, and
-when a database that has been written to closes.
+the log over. By default this happens once the log reaches an eighth of the page
+cache (never less than a thousand frames, never more than 64 MB), and when a
+database that has been written to closes.
 
 When the log starts over, frame numbering restarts from zero. Frame 40 before the
 reset and frame 40 after it are completely different changes, so replication

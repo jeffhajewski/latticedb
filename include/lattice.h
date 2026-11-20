@@ -403,9 +403,12 @@ lattice_error lattice_close(lattice_database* db);
  * A commit is durable once it is in the log (the -wal file). A checkpoint
  * writes the pages the log's commits changed into the database file, through
  * the flush journal, and can then empty the log. By default a commit runs one
- * once the log holds 1000 frames (LATTICE_AUTO_CHECKPOINT_FRAMES in the
- * environment sets another default, 0 for none), and opening and closing a
- * database fold whatever the log holds into the file.
+ * once the log reaches an eighth of the page cache (cache_size_mb), never
+ * less than 1000 frames of 4096 bytes and never more than 64 MB: 3200
+ * frames for the default 100 MB cache, 16384 for 512 MB or more.
+ * LATTICE_AUTO_CHECKPOINT_FRAMES in the environment sets a fixed frame count
+ * instead (0 for none). Opening and closing a database fold whatever the log
+ * holds into the file.
  *
  * The interval is a trade-off. A larger one means fewer checkpoints, each a
  * longer pause for the commit that runs it (it writes every page changed
@@ -451,7 +454,9 @@ lattice_error lattice_checkpoint(
  * max_wal_frames frames, and no sooner than min_interval_ms after the last
  * automatic checkpoint (0 for no minimum). max_wal_frames 0 switches automatic
  * checkpoints off, leaving them to lattice_checkpoint; the log then grows until
- * one runs. Either way, close still folds the log into the file. Overrides
+ * one runs. Either way, close still folds the log into the file. The frame
+ * count is used as given, not scaled to the cache; pass 1000 for the
+ * interval of releases before the default followed the cache. Overrides
  * LATTICE_AUTO_CHECKPOINT_FRAMES. Has no effect on a read-only handle. */
 lattice_error lattice_set_auto_checkpoint(
     lattice_database* db,

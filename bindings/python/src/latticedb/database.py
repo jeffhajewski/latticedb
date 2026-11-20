@@ -1217,9 +1217,11 @@ class Database:
         and no sooner than ``min_interval_ms`` after the last automatic one.
         ``max_wal_frames=0`` switches automatic checkpoints off: the log grows
         until :meth:`checkpoint` runs, though closing still folds it into the
-        file. Without this call the default is 1000 frames, or the
-        ``LATTICE_AUTO_CHECKPOINT_FRAMES`` environment variable (0 for none);
-        this call wins over the variable. It has no effect on a read-only
+        file. Without this call the
+        ``LATTICE_AUTO_CHECKPOINT_FRAMES`` environment variable sets the frame
+        count (0 for none), and without that the log may grow to an eighth of
+        the page cache, from 1000 frames up to 64 MB. This call wins over the
+        variable, and its count is used as given, not scaled to the cache. It has no effect on a read-only
         database.
 
         A larger interval means fewer checkpoints, each a longer pause for the

@@ -312,9 +312,10 @@ func (db *DB) Checkpoint(mode CheckpointMode) (CheckpointStats, error) {
 // nonzero interval under a millisecond becomes 1ms); 0 means no minimum. maxWALFrames 0 switches automatic checkpoints off: the log
 // grows until Checkpoint runs, though Close still folds it into the file.
 //
-// Without this call the default is 1000 frames, or the
-// LATTICE_AUTO_CHECKPOINT_FRAMES environment variable (0 for none); this call
-// wins over the variable. It has no effect on a read-only database.
+// Without this call the LATTICE_AUTO_CHECKPOINT_FRAMES environment variable
+// sets the frame count (0 for none), and without that the log may grow to an
+// eighth of the page cache, from 1000 frames up to 64 MB. This call wins over
+// the variable, and its count is used as given, not scaled to the cache. It has no effect on a read-only database.
 //
 // A larger interval means fewer checkpoints, each a longer pause for the
 // commit that runs it, a longer log on disk and more to replay after a crash. A

@@ -251,13 +251,25 @@ Usually you don't decide. Checkpoints run at four moments.
 
 | Setting | Default | Meaning |
 |---------|---------|---------|
-| `max_wal_frames` | 1000 | WAL frames written before a checkpoint is considered |
+| `max_wal_frames` | null: an eighth of the buffer pool, 1000 to 16,384 frames | WAL frames written before a checkpoint is considered |
 | `min_interval_ns` | 0 | Shortest gap between two automatic checkpoints |
 | `mode` | `.truncate` | The only mode that resets the log, so the only one that bounds its size |
 
-Each commit that changed something writes at least one frame, so the default is
-at most a thousand write transactions; single-node commits reach it about once in a
-few hundred. The automatic checkpoint is best
+Left null, `max_wal_frames` is scaled to the buffer pool the database opened
+with: the log may grow to an eighth of the pool's bytes, never less than 1000
+frames of 4096 bytes and never more than 64 MB, counted in the log's own frame
+size (`AutoCheckpointConfig.defaultMaxWalFrames`). The 100 MB cache of the C API
+and the bindings gives 3,200 frames; the Zig API's 28 MB default and an in-memory
+database's small fixed pool give 1000; 512 MB or more gives 16,384. The reason is
+the cost of a checkpoint: it writes every page dirtied since the last one twice and
+syncs, and with a 1 GB cache a bulk load of 1M nodes and 2M relationships took
+12.1 s at 1000 frames and 8.6 s at 64 MB. The cap bounds what a crash leaves to
+replay and the size of the `-wal` file. A number set in `max_wal_frames`, or through
+any of the setters below, is used as it is. `Database.autoCheckpoint()` returns the
+policy with the frame count filled in, so it says what the default came to.
+
+Each commit that changed something writes at least one frame, so with a small
+cache the default is at most a thousand write transactions. The automatic checkpoint is best
 effort: it runs after the commit has succeeded, and if it fails, or is refused
 because a transaction has records in the log, the commit still reports success and
 the next commit tries again. Setting `auto_checkpoint = null` turns it off.
@@ -384,6 +396,6 @@ if (checkpointer.getLastStats()) |stats| {
 | Passive mode | Writes nothing if a dirty page is pinned |
 | Full mode | Flushes everything, keeps the log |
 | Truncate mode | Flushes everything and empties the log; the automatic default |
-| Auto-checkpoint | After a commit, at 1000 frames; refused while a transaction has records in the log |
+| Auto-checkpoint | After a commit, once the log reaches an eighth of the buffer pool (1000 frames to 64 MB); refused while a transaction has records in the log |
 
 Checkpointing is the bridge between WAL-based durability (fast commits) and bounded recovery time (fast restart). Without it, durability requires replaying the entire history on every startup.

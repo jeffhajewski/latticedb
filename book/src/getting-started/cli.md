@@ -617,8 +617,9 @@ restoring to any moment inside it.
 
 Passes that ship frames rather than snapshots come from a process that keeps the
 database open while it writes and replicates through the same handle: the Zig
-API's `replicateTo`. Its log is reset only by a checkpoint (automatically after
-about a thousand frames, by default) or when the database closes, and between
+API's `replicateTo`. Its log is reset only by a checkpoint (automatically, by
+default once the log reaches an eighth of the page cache, between a thousand
+frames and 64 MB) or when the database closes, and between
 resets each pass copies only the new frames, into a `frames/` directory inside
 the generation. The C API and the
 language bindings do not expose replication.
@@ -707,7 +708,9 @@ How often a command's commits checkpoint is set with `--auto-checkpoint=<frames>
 on any command that writes: a checkpoint runs once the log holds that many frames
 (one per page written), and `0` means none while the command runs, though closing
 still folds the log into the file. Without the option the
-`LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable decides, else 1000:
+`LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable decides, else the log may
+grow to an eighth of the page cache, between 1000 frames and 64 MB: 2048 frames
+with the default 64 MB cache, 16,384 with `--cache-size=512` or more:
 
 ```bash
 lattice import social.lattice --file=people.jsonl --auto-checkpoint=0

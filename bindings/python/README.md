@@ -390,10 +390,13 @@ db.cache_clear()
 
 A commit is durable once it is in the log (the `-wal` file beside the database).
 A checkpoint writes the pages the log's commits changed into the database file
-and can then empty the log. By default a commit runs one once the log holds 1000
-frames (one frame per page, 4096 bytes); the `LATTICE_AUTO_CHECKPOINT_FRAMES`
-environment variable sets another default (`0` for none), and
-`set_auto_checkpoint` wins over it. Closing a database always folds the log into
+and can then empty the log. By default a commit runs one once the log reaches an
+eighth of the page cache, never less than 1000 frames (one frame per page, 4096
+bytes) and never more than 64 MB: 3,200 frames with the default 100 MB cache,
+16,384 with `cache_size_mb` of 512 or more. The `LATTICE_AUTO_CHECKPOINT_FRAMES`
+environment variable sets a fixed frame count instead (`0` for none), and
+`set_auto_checkpoint` wins over it; either is used as given, so `1000` brings back the
+interval of releases before the default followed the cache. Closing a database always folds the log into
 the file.
 
 ```python

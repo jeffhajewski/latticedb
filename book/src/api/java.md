@@ -112,7 +112,7 @@ the database file now and returns `CheckpointStats` (`pagesFlushed`,
 `durationNs`, `checkpointLsn`, `walTruncated`); `PASSIVE` gives way if a changed
 page is in use, `FULL` leaves the log in place. `db.setAutoCheckpoint(maxWalFrames,
 minIntervalMs)` sets when commits checkpoint from then on, 0 frames for never.
-Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count (default 1000). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
+Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count; without either, the log may grow to an eighth of the page cache, from 1000 frames up to 64 MB (3,200 frames with the default 100 MB cache). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
 
 ## Transactions
 

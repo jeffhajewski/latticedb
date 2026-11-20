@@ -335,8 +335,10 @@ going to tell you it was not.
 
 A commit is durable once it is in the log. A checkpoint writes the pages the
 log's commits changed into the database file, and can then empty the log. A
-commit runs one once the log holds 1000 frames (one per page written), and open
-and close fold whatever the log holds into the file.
+commit runs one once the log reaches an eighth of the page cache (frames are one
+page each), never less than 1000 frames and never more than 64 MB: 3,200 frames
+with the default 100 MB cache, 16,384 with 512 MB or more. Open and close fold
+whatever the log holds into the file.
 
 ```c
 lattice_checkpoint_stats stats;
@@ -355,7 +357,8 @@ holds and whether the log was emptied. A read-only handle gets
 
 `lattice_set_auto_checkpoint(db, max_wal_frames, min_interval_ms)` changes when
 that handle's commits checkpoint from then on; 0 frames switches them off and the
-log grows until `lattice_checkpoint` or close. Without it, the
+log grows until `lattice_checkpoint` or close. A frame count set here is used as
+given, not scaled to the cache. Without it, the
 `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count. A
 larger interval means fewer pauses, each longer, a longer log and more to replay
 after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).

@@ -159,7 +159,7 @@ err = db.SetAutoCheckpoint(0, 0)                           // commits never chec
 `CheckpointPassive` gives way if a changed page is in use, `CheckpointFull`
 writes every changed page, and `CheckpointTruncate` does that and empties the
 log. `CheckpointStats` reports `PagesFlushed`, `Duration`, `CheckpointLSN` and
-`WALTruncated`. Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count (default 1000). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
+`WALTruncated`. Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count; without either, the log may grow to an eighth of the page cache, from 1000 frames up to 64 MB (3,200 frames with the default 100 MB cache). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
 
 ## Writing
 

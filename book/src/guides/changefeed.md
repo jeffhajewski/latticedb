@@ -421,8 +421,8 @@ were dropped. It is refused while a write transaction is open on the handle
 (`LATTICE_ERROR_LOCK_TIMEOUT`). Under `all` it drops nothing.
 
 Otherwise, events are dropped at checkpoints: automatically once the log
-passes its threshold (1,000 log frames by default), on `lattice checkpoint`,
-and when the database is closed. A database opened without the log has no
+passes its threshold (by default an eighth of the page cache, from 1,000 log
+frames up to 64 MB), on `lattice checkpoint`, and when the database is closed. A database opened without the log has no
 checkpoints; its events are dropped when its pages are flushed instead: on
 `sync()` (Zig), at close, and after a commit once half the page cache holds changes.
 

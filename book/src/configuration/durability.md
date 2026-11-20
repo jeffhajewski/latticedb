@@ -115,7 +115,7 @@ Each applies only when the program did not set the option itself.
 | `LATTICE_SYNC_MODE` | `full`, `normal` | unset (`full`) | Whether a commit waits for the disk; see [Sync mode](#sync-mode) |
 | `LATTICE_FULL_FSYNC` | `1`/`true`, `0`/`false` | unset (off) | `F_FULLFSYNC` on macOS; see [Full fsync on macOS](#full-fsync-on-macos) |
 | `LATTICE_BUFFER_POOL_MB` | a positive integer | unset | Page cache size where the program sets none (an explicit size wins); see [Opening a Database](./opening.md#memory-and-caching) |
-| `LATTICE_AUTO_CHECKPOINT_FRAMES` | a non-negative integer | unset (1000) | Log frames a commit waits for before checkpointing, 0 for none, in the C API, the bindings and the CLI; see [Checkpointing](#checkpointing) |
+| `LATTICE_AUTO_CHECKPOINT_FRAMES` | a non-negative integer | unset (scaled to the cache) | Log frames a commit waits for before checkpointing, 0 for none, in the C API, the bindings and the CLI; used as given, not scaled; see [Checkpointing](#checkpointing) |
 
 ## Running without the log
 
@@ -191,6 +191,11 @@ Peak memory was the cache plus 25 to 80 MB. With the log off, the
 changefeed off and a 1 GB cache, transactions cost no more than the same load
 written directly with a `null` transaction (10–11 s), and they still roll back.
 
+The rows with the log on were measured when a commit checkpointed every 1,000 log
+frames whatever the cache. The default interval now grows with the cache, which
+helps most in the 1 GB rows: see
+[Why the interval follows the cache](#why-the-interval-follows-the-cache).
+
 The published figures for this load are measured through the C API on a quiet
 machine, where the default cache is 100 MB and the default sync mode `full`:
 34.4 s with the defaults and 7.9 s with the last row's settings. See
@@ -201,16 +206,21 @@ machine, where the default cache is 100 MB and the default sync mode `full`:
 The log grows as you write. A checkpoint folds it back into the database file and
 resets it, which is what stops it growing forever.
 
-This happens on its own, after a commit, once the log holds enough frames. Each
-write transaction adds at least one frame, so with the defaults that is at most
-every thousand write transactions; single-node commits reach it about once in a few
-hundred. Open readers do not hold it back. It is skipped
+This happens on its own, after a commit, once the log holds enough frames. How
+many depends on the page cache: by default the log may grow to an eighth of the
+cache, never less than 1,000 frames (4 MB) and never more than 64 MB. With the
+100 MB cache the C API and the bindings open with, that is 3,200 frames, 12.5 MB of
+log; the CLI's 64 MB cache gives 2,048; a cache of 512 MB or more gives 16,384, the
+64 MB cap. Each write transaction adds at least one frame, so with a small cache a
+checkpoint comes at most every thousand write transactions. Open readers do not
+hold it back. It is skipped
 only while an open transaction already has records in the log (one whose commit
 failed part way and has not been rolled back yet), and the next commit tries again.
 
 The automatic checkpoint runs inside the commit that triggers it, not in the
 background, so that one commit takes longer. Of 20,000 single-node commits through
-the C API with the default settings (see [Benchmarks](../performance/benchmarks.md)),
+the C API with the default settings, measured when the interval was still a fixed
+1,000 frames (see [Benchmarks](../performance/benchmarks.md)),
 the median took 44 µs and the 99.9th percentile 1.4 ms, which is where the commits
 that ran a checkpoint, and the disk's own stalls, show; the slowest single commit
 ranged from 2 ms to over 200 ms from run to run, as it did in 0.16.0. If a pause of
@@ -229,7 +239,7 @@ those is used, the C API, the bindings and the CLI take the frame count from
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
-| `max_wal_frames` | 1000 | Frames written before a checkpoint is considered. |
+| `max_wal_frames` | an eighth of the cache, 1,000 to 16,384 frames | Frames written before a checkpoint is considered. A number you set is used as it is. |
 | `min_interval_ns` | 0 | Shortest gap between two checkpoints. |
 | `mode` | `truncate` | Only `truncate` resets the log, so it is the only mode that bounds its size. |
 
@@ -238,9 +248,14 @@ you want to choose the moment rather than have it land mid-request; the database
 still checkpoints at open and close. From Zig, opening with `auto_checkpoint` set to
 null also turns off the checkpoints at open and close described below.
 
+The default is counted in bytes of log and converted to the log's own frames, one
+page each, so a database with 16 KB pages checkpoints after a quarter as many
+frames as one with 4 KB pages. A frame count you set, through any of the setters
+above or `LATTICE_AUTO_CHECKPOINT_FRAMES`, is a frame count and is used as it is.
+
 The minimum interval defaults to zero deliberately. Under `truncate` the frame
 threshold already limits the rate, because a checkpoint resets the frame count and
-the next one cannot happen until another thousand frames are written. A time gate
+the next one cannot happen until another `max_wal_frames` frames are written. A time gate
 on top of that does not prevent thrash; it just lets the log grow without limit
 during a burst of writes, which is the thing this is meant to stop.
 
@@ -249,6 +264,21 @@ closed, through any API or the CLI, if the log holds changes since its last
 checkpoint. A cleanly closed database therefore leaves no journal and nothing in the
 log to replay. A log that ends at a checkpoint is left as it is, which matters for
 replication: see [Backup and Replication](../guides/backup-and-replication.md).
+
+### Why the interval follows the cache
+
+A checkpoint writes every page dirtied since the last one twice, once into the
+journal and once in place, and syncs. With a large cache, checkpointing every
+4 MB of log throws away what the cache could hold. A bulk load of a million nodes
+and two million relationships, 10,000 rows per transaction, took 12.1 s with a 1 GB
+cache and the old fixed 1,000 frames, and 8.6 s with 64 MB of log. With the 100 MB
+cache the interval made no measurable difference: there the flush that runs when
+half the cache is dirty does most of the writing. The 64 MB cap bounds how much log
+a crash leaves to replay and how large the `-wal` file grows.
+
+To get the old fixed interval back, set it to 1,000 frames: with
+`LATTICE_AUTO_CHECKPOINT_FRAMES=1000`, `--auto-checkpoint=1000`, or 1000 in any of
+the setters above.
 
 ## Checkpointing by hand
 

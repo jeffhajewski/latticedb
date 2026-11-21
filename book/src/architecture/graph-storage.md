@@ -114,17 +114,70 @@ edge-ID index 100 → 69 MB). Measured with that change alone, before the
 others in the same release, the default load went from about 35 s to 27 s and a
 load without the log from 8 s to 6.3 s.
 
-The order is a property of the file, chosen when it is created and never
-changed. A file created in format 5 sets `FileFlags.ORDERED_ID_KEYS` in its
-header and requires a format-5 reader (`min_reader_version` 5), so 0.17 and
-0.18, which would decode every id wrongly, refuse it. A file created earlier
-keeps its little-endian keys: it is not converted, every read and write on it
+The order is a property of the file, chosen when it is created. A file
+created in format 5 sets `FileFlags.ORDERED_ID_KEYS` in its header and
+requires a format-5 reader (`min_reader_version` 5), so 0.17 and 0.18, which
+would decode every id wrongly, refuse it. A file created earlier keeps its
+little-endian keys: opening it converts nothing, every read and write on it
 uses the old order, and it stays open to 0.17 and 0.18. The database reads the
 order from the header once at open (`Database.id_key_order`) and hands it to
 the node store, the edge store, the full-text index and the vector index;
 `src/core/id_key.zig` does the encoding. `DatabaseConfig.new_database_id_keys
 = .little` creates a new file in the old layout, for a file that 0.18 has to
 read.
+
+#### Upgrading an older file
+
+`lattice compact --upgrade-id-keys` converts a little-endian file, one-way
+(`Database.upgradeIdKeysTo` in `src/storage/id_key_upgrade.zig`). It never
+works on the file itself. It copies the database with `backup`, converts the
+copy, checks the copy against the original, which is still open, and only then
+renames the copy over it.
+
+The conversion opens the copy below the `Database`, with a page manager and a
+buffer pool and no log: the copy is disposable, so a crash there only means
+starting again. It converts the five trees one at a time, smallest first. For
+each it collects every key, works out the new key, sorts, and inserts into an
+empty tree in that order, fetching each value from the old tree by its old key.
+Sorted inserts fill the leaves, as new ids do in a format-5 file. Then it frees
+every page of the old tree and records the new root. Only when all five are
+done does it set `ORDERED_ID_KEYS`, raise the minimum reader version to 5, give
+the file a new `file_uuid`, and sync. A copy that stops half way is still
+little-endian in its header, and it is deleted anyway.
+
+Not every key in these trees is a bare id, so the converter checks the shape of
+each one and refuses a key it does not recognise:
+
+| Tree | Keys | Converted |
+|------|------|-----------|
+| Node tree | 8-byte node id | id |
+| Edge-ID index | 8-byte edge id; id 0 holds `next_edge_id` (`EDGE_ID_META_KEY`) | id (0 is all zero bytes either way) |
+| Full-text lengths | `[scope:4][doc_id:8]`, an unscoped `[doc_id:8]`, the statistics keys `\x00stats` and `\x00anlyz` (6 bytes, `STATS_KEY` and `ANALYSIS_KEY`), and the same two behind a scope (10 bytes) | the id after the scope; the statistics keys are kept as they are |
+| Full-text reverse index | `[scope:4][doc_id:8]`, or `[doc_id:8]` | the id after the scope |
+| Vector index node tree | 8-byte node id; `0xFF × 8` holds the index metadata (`METADATA_KEY`) | id; the metadata key is kept |
+
+The scope is the four-byte prefix `ScopedTree` puts in front of a key; it is
+not an id and stays as it is. Values are not touched: they were little-endian
+in every format.
+
+Freeing the old pages is the step that could lose data if it went wrong, so it
+is checked from two sides. Before converting, the converter walks every page of
+every tree in the header (internal, leaf and overflow pages, through
+`BTree.forEachPage`) and the free list, and records an owner for each page; a
+page found twice stops it. It frees a page of an old tree only if that walk
+recorded the page as that tree's, so pages that are not B-tree pages at all
+(full-text postings, vector data, HNSW connections) can never be freed. After
+the conversion it walks everything again: every page must be the header, in
+exactly one tree, or free. Verification repeats that walk on the copy as it was
+reopened, reads every page back with its checksum, and compares it with the
+original through the stores; any difference deletes the copy. The integration
+test then fills every freed page with new data and compares again, because a
+page freed while still in use would show only once it was reused.
+
+The converted file is usually somewhat larger than the original. The new trees
+go into new pages at the end of the file, and the old trees' pages become free
+pages in the middle, which `compact` cannot cut off. They are reused as the
+database grows.
 
 Only the keys changed. Values (the edge payload, the next edge id, document
 lengths, the vector index's node entries) are little-endian in every format.

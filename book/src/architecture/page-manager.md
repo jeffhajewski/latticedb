@@ -425,7 +425,11 @@ stored in order (see [Graph Storage](./graph-storage.md#id-key-order)). Such a f
 sets the flag `ORDERED_ID_KEYS` (`0x40`) and is created with minimum reader version
 5 and the reason `ordered id keys`, so 0.17 and 0.18 (format 4), which would decode
 every id wrongly, refuse it with `VersionTooNew`. The flag is in the 200 bytes every
-release keeps, and is never set or cleared after creation.
+release keeps. Opening a file never sets or clears it; only `lattice compact
+--upgrade-id-keys` sets it, on a converted copy that then replaces the original
+(see [Graph Storage](./graph-storage.md#upgrading-an-older-file)). The converted file
+gets the reason `ordered id keys` and minimum reader version 5 as if it had been
+created in format 5, and a new `file_uuid`. Nothing ever clears the flag.
 
 A file created before format 5 keeps its little-endian keys. A read-write open of
 such a file sets the format version to 5 and writes the format-4 fields; it never
@@ -442,7 +446,7 @@ minimum reader reasons. Each reason requires the format that introduced it:
 | `0x02` | ordered property index | 4 | a property index is declared; 0.16.0 would take its keys for digests and find nothing |
 | `0x04` | changefeed events | 4 | a commit records its first changefeed event; 0.16.0's `changes()` would skip events in this release's format without an error, and its trim would leave them |
 | `0x08` | full-text positions | 4 | a full-text index that stores word positions takes its first document; 0.16.0 would append posting entries without a position count and garble the page |
-| `0x10` | ordered id keys | 5 | the file is created in format 5 (never later) |
+| `0x10` | ordered id keys | 5 | the file is created in format 5, or converted by `compact --upgrade-id-keys` |
 
 Opening never raises it: a read-only open changes nothing, and a read-write open that
 writes nothing leaves the version where it was (3 for an untouched old file). A changefeed with retention `off` records no

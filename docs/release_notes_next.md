@@ -8,6 +8,8 @@ Use this file as the draft for the next release after `0.18.1`.
   which makes loading faster and the file smaller. **0.18.x and earlier cannot
   open a database this release creates.** Existing databases are not changed
   and stay readable by the releases that could read them before.
+  `lattice compact --upgrade-id-keys` converts one to format 5 if you want the
+  new layout; it is optional and one-way.
 - A commit that creates many relationships files them in key order, so a bulk
   load gets faster the larger its transactions are: 1M nodes and 2M
   relationships with the default settings load in 11.3 s at 100,000 rows per
@@ -30,6 +32,18 @@ Use this file as the draft for the next release after `0.18.1`.
   the default load went from about 35 s to 27 s, a load without the log from
   8 s to 6.3 s, the node tree from 70.6 MB to 51.9 MB and the edge-ID index from
   100 MB to 69 MB (both 99% full, from 73% and 69%).
+- **Older files can be upgraded to the new layout.** `lattice compact
+  --upgrade-id-keys <path>` converts a database created by 0.18.1 or earlier to
+  format 5. You do not have to: an existing database keeps working with this
+  release as it is. Upgrading gives it what a new file has, scans in ascending
+  id order and full id trees. The command writes the upgraded database to a
+  copy beside the original, checks the copy against the original (every node,
+  edge, full-text and vector entry, the next ids, and that no page is used twice
+  or lost), and only then renames it into place. If anything fails, the copy is
+  deleted and the original is as it was. **The upgrade is one-way: 0.18 and
+  earlier cannot open the upgraded file**, and there is no way back but an
+  export from this release. See
+  [Upgrading an older file to format 5](../book/src/getting-started/cli.md#upgrading-an-older-file-to-format-5).
 - **Large transactions load relationships much faster.** A relationship has two
   entries in the edge tree, one under each of its nodes, and they belong wherever
   those nodes' other relationships are. Applied one relationship at a time, a
@@ -123,8 +137,32 @@ Use this file as the draft for the next release after `0.18.1`.
   format that introduced them, rather than "this release's format". It is the
   same number as before for files that already had it, and it is what keeps
   older files open to 0.17 and 0.18.
-- No converter yet: an existing database keeps the old layout until it is
-  exported and imported into a new one.
+- **Upgrading an existing database is optional.** It keeps working with this
+  release in its old layout. `lattice compact --upgrade-id-keys <path>`
+  converts it to format 5 (it can be combined with `--upgrade-indexes`). What to
+  know before running it:
+  - **It is one-way.** 0.18, 0.17 and 0.16.0 refuse the upgraded file
+    (`LATTICE_ERROR_VERSION_MISMATCH`) and leave it unchanged. Keep a backup if
+    an older release still has to open the data.
+  - The original is replaced only after the upgraded copy has passed every
+    check. If the command is stopped part way, the path still holds a whole
+    database, the original or the upgraded one, and running the command again
+    finishes the job. It refuses while another process has the file open.
+  - The upgraded file is usually a little **larger**, not smaller: the old
+    trees' pages are freed in the middle of the file, where `compact` cannot cut
+    them off, and are reused as the database grows. A 1.9 MB file created by
+    0.18.1 grew 6%, to 2.0 MB, and a 7.8 MB test database with 66,000 nodes
+    grew 20%, to 9.4 MB. Expect growth of up to about the size of the node
+    tree, the largest tree converted, whose new pages have to exist while its
+    old ones are read. The command needs that much free disk space beyond the
+    second copy.
+  - The upgraded file gets a new file id, so a replication directory made from
+    it before the upgrade is refused (`replicate` reports a UUID mismatch).
+    Start a new one.
+  - Scan order changes as for a new file: a walk of the edge-ID index, as in
+    `MATCH ()-[r:KNOWS]->()` with nothing else bound, now returns ascending edge
+    ids.
+  - It runs from the CLI only; the C API and the bindings have no call for it.
 - **A crashed database is recovered by this release, not an older one.** That
   was already so: 0.17 and 0.18 may read, but not write, a file this release has
   written, and they refuse it outright while its log still holds work to replay
@@ -154,6 +192,28 @@ Use this file as the draft for the next release after `0.18.1`.
   and a small cache, 250 frames (4 MB) where it used to be 1,000 (16 MB).
 
 ## Validation Notes
+
+- The id key upgrade is tested on an old-layout database with something in
+  every tree it rewrites: nodes with several labels, lists and values larger
+  than a page, ids past 256 and 65,536, deleted nodes and relationships,
+  relationship properties, three full-text indexes (two scopes on nodes, one on
+  relationships), vectors, a property index and the changefeed. Queries,
+  traversals both ways, full-text results and scores, vector search, property
+  index lookups and `ORDER BY`, and the changefeed must all come back the same
+  after the upgrade, after new writes, after a reopen, and after every page the
+  upgrade freed has been reused; scans must come back in ascending order and the
+  page accounting must find no page used twice. Also tested: an empty database,
+  one with only nodes, one without full-text or vectors, a format-5 file (left
+  alone), the refusals (open transaction, in memory, read-only, existing
+  destination), a failure injected after the copy, half way through the
+  conversion and in verification (source file unchanged, no files left), a stop
+  after each step of the swap (the path opens whole and a rerun finishes), and
+  the CLI's table, JSON and CSV output.
+- By hand with 0.18.1: a file it created with full-text indexes, vectors and a
+  property index gave the same query, search and changefeed results through
+  this release's library before and after `compact --upgrade-id-keys` (except
+  the order of an unordered `MATCH ()-[r:R]->()`, now ascending), and 0.18.1
+  then refused it, read-only and read-write, leaving its bytes unchanged.
 
 - The sorted apply is held to the edge-by-edge one: transactions on either side
   of the 64-relationship threshold, in both file layouts, must leave the same

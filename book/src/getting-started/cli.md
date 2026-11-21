@@ -248,7 +248,9 @@ Index:        [:KNOWS](since)  ordered
 `Format` is the format the file was last written in. `Id keys` says how the
 file stores node, edge and document ids as keys: a file created by this
 release has `big-endian` keys, stored in id order; one created by 0.18 or
-earlier keeps `little-endian (created before format 5)` for good.
+earlier keeps `little-endian (created before format 5)` until
+`compact --upgrade-id-keys` converts it, and `info` says so on the next line
+([Upgrading an older file to format 5](#upgrading-an-older-file-to-format-5)).
 
 `Min reader` is the oldest LatticeDB that can open the file, and what keeps
 older ones out. `ordered id keys` is in every file this release creates and
@@ -767,6 +769,73 @@ With `--upgrade-indexes` it first rebuilds every property index still in an olde
 encoding, so that one created by 0.16.0 answers ranges and sorting too, and
 reports how many it rebuilt as `Indexes rebuilt:`.
 
+### Upgrading an older file to format 5
+
+A file created by 0.18 or earlier stores its ids little-endian (`lattice info`
+says `Id keys: little-endian`). It keeps working as it is: this release reads and
+writes it in that layout, and you never have to upgrade it. Upgrading gives it the
+format-5 layout, where ids are stored in order, so scans return ascending ids and
+the id trees are full. `--upgrade-id-keys` does it:
+
+```bash
+lattice compact social.lattice --upgrade-id-keys
+```
+
+```text
+Upgraded the id keys of social.lattice to big-endian (format 5)
+  This is one-way: 0.18 and earlier can no longer open this file.
+  node tree: 299 entries, 35 pages before, 34 after
+  edge id index: 399 entries, 7 pages before, 6 after
+  full-text document lengths: 602 entries, 7 pages before, 5 after
+  full-text reverse index: 598 entries, 9 pages before, 7 after
+  vector index node tree: 300 entries, 5 pages before, 4 after
+  Entries checked: 2198
+  Size before:     1908736 bytes
+  Size upgraded:   2023424 bytes
+Compacted database: social.lattice
+  Pages before:    494
+  Pages after:     494
+  Pages removed:   0
+  Bytes reclaimed: 0
+```
+
+**It is one-way.** The upgraded file needs a format-5 reader, so 0.18 and earlier
+refuse it. There is no command to go back. Keep a backup if an older release still
+has to open the data.
+
+The original is not touched until a converted copy has passed every check. The
+command:
+
+1. Copies the database to `<path>.upgrade-id-keys` beside it, the way `backup` does.
+2. Rewrites the five trees keyed by id in the copy: the node tree, the edge-ID index,
+   the full-text document lengths and reverse index, and the vector index's node
+   tree. Each one is read whole, its keys turned around, and written again in order.
+3. Opens the copy the normal way and compares it with the original: every node's
+   labels and properties, every edge's ends, type and properties, the next node and
+   edge ids, every full-text and vector entry, and the number of entries in each
+   tree. It also reads every page back with its checksum, and checks that no page
+   belongs to two trees, or to a tree and the free list.
+4. Closes the original, checks its log is empty and that nothing changed it in the
+   meantime, and renames the copy over it.
+
+If any step fails, the copy is deleted and the original is left as it was. If the
+command is stopped part way, the path holds either the whole original or the whole
+upgraded file, and running it again finishes the job. It refuses while another
+process has the database open.
+
+The converted file gets a new file id. A replication directory made from the old
+file then refuses to continue (`replicate` reports a UUID mismatch), so start a new
+one after upgrading.
+
+The upgraded file is usually a little **larger**, not smaller: the new trees are
+written into new pages, and the old trees' pages go on the free list in the middle
+of the file, where `compact` cannot cut them off. Above, the file grew by 6%; a test
+database of 7.8 MB with 66,000 nodes grew by 20%, about the size of its new node
+tree. Those pages are reused as the database grows. While it runs, the command needs
+free disk space for a second copy of the database plus that growth. With a file that is already format 5 the
+command says `Id keys are already big-endian (format 5); nothing to upgrade.` and
+just compacts. It can be combined with `--upgrade-indexes`.
+
 ### Keeping the changefeed in check
 
 Every change to the graph is recorded as an event in the changefeed, and by
@@ -922,7 +991,7 @@ lattice count social.lattice --format=csv >> counts.csv
 |---------|--------------|
 | `create <path>` | Make a new database |
 | `info <path>` | Show file size, counts, features, indexes, and which releases can open it |
-| `compact <path>` | Give free pages at the end of the file back to the OS |
+| `compact <path>` | Give free pages at the end of the file back to the OS; `--upgrade-id-keys` converts an older file to format 5 |
 | `checkpoint <path>` | Flush pending writes into the file and reset the log |
 | `changefeed <path>` | Show the changefeed, set how much of it to keep, trim it |
 | `backup <path>` | Copy to another file while the database stays open |

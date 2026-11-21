@@ -170,9 +170,25 @@ recorded the page as that tree's, so pages that are not B-tree pages at all
 the conversion it walks everything again: every page must be the header, in
 exactly one tree, or free. Verification repeats that walk on the copy as it was
 reopened, reads every page back with its checksum, and compares it with the
-original through the stores; any difference deletes the copy. The integration
+original through the stores. It also compares, byte for byte, every page that
+the first walk gave to nothing (vector data, neighbour lists, postings) or to a
+tree other than the five: those must be exactly as in the original's file, which
+`backup` left quiesced. Only the header, the five trees' pages and pages that
+were free may differ. Any difference deletes the copy. The integration
 test then fills every freed page with new data and compares again, because a
 page freed while still in use would show only once it was reused.
+
+The conversion holds every key of the tree it is converting in memory at once,
+13 bytes each (a length byte and up to 12 key bytes), allocated once at the size
+the tree reports; the largest tree decides how much.
+
+The CLI keeps the original locked throughout: it opens the database, upgrades,
+checkpoints, and closes it with `Database.closeKeepingLock`, which does
+everything `close` does but hands back the file still open and locked.
+`id_key_upgrade.replaceWithUpgraded` takes that file, checks the log and journal
+are empty, deletes them, and renames the copy over the original while the lock
+is still held, then lets go. On Windows a file that is open cannot be renamed
+over, so the lock is released just before the rename.
 
 The converted file is usually somewhat larger than the original. The new trees
 go into new pages at the end of the file, and the old trees' pages become free

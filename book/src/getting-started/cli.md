@@ -790,8 +790,11 @@ Upgraded the id keys of social.lattice to big-endian (format 5)
   full-text reverse index: 598 entries, 9 pages before, 7 after
   vector index node tree: 300 entries, 5 pages before, 4 after
   Entries checked: 2198
+  Pages checked unchanged: 402
   Size before:     1908736 bytes
   Size upgraded:   2023424 bytes
+  63 pages freed for reuse; the file shrinks only if they are at its end.
+  The file has a new id: replicate it to a new directory, not an old one.
 Compacted database: social.lattice
   Pages before:    494
   Pages after:     494
@@ -806,35 +809,54 @@ has to open the data.
 The original is not touched until a converted copy has passed every check. The
 command:
 
-1. Copies the database to `<path>.upgrade-id-keys` beside it, the way `backup` does.
-2. Rewrites the five trees keyed by id in the copy: the node tree, the edge-ID index,
+1. Opens the database, which locks it, and keeps it locked to the end. A second
+   `compact --upgrade-id-keys` on the same file stops here, without touching the first
+   one's copy.
+2. Copies the database to `<path>.upgrade-id-keys` beside it, the way `backup` does.
+3. Rewrites the five trees keyed by id in the copy: the node tree, the edge-ID index,
    the full-text document lengths and reverse index, and the vector index's node
    tree. Each one is read whole, its keys turned around, and written again in order.
-3. Opens the copy the normal way and compares it with the original: every node's
+4. Opens the copy the normal way and compares it with the original: every node's
    labels and properties, every edge's ends, type and properties, the next node and
    edge ids, every full-text and vector entry, and the number of entries in each
-   tree. It also reads every page back with its checksum, and checks that no page
-   belongs to two trees, or to a tree and the free list.
-4. Closes the original, checks its log is empty and that nothing changed it in the
-   meantime, and renames the copy over it.
+   tree. Every page the conversion had no reason to change (vector data, full-text
+   postings, the label and property indexes, the changefeed and the other trees) must
+   be byte for byte the same as in the original. It also reads every page back with
+   its checksum, and checks that no page belongs to two trees, or to a tree and the
+   free list.
+5. Closes the original, keeping its file locked, checks its log is empty, and renames
+   the copy over it. On Linux and macOS the lock is held through the rename, so no
+   other process can open the database at any point. On Windows a file cannot be
+   renamed over while it is open, so the lock is let go just before the rename.
 
 If any step fails, the copy is deleted and the original is left as it was. If the
 command is stopped part way, the path holds either the whole original or the whole
 upgraded file, and running it again finishes the job. It refuses while another
 process has the database open.
 
-The converted file gets a new file id. A replication directory made from the old
-file then refuses to continue (`replicate` reports a UUID mismatch), so start a new
-one after upgrading.
+**What it needs.** Memory: the conversion holds every key of the tree it is working
+on at once, 13 bytes per entry, so the largest tree decides: about 1.3 GB for a
+database with 100 million edges, on top of the page cache. Disk: room beside the
+database for a second copy of it, plus the growth described below. Running out of
+either fails like any other step, with the copy deleted and the original untouched.
+
+**The file gets a new id.** A [replication](../guides/backup-and-replication.md)
+directory made before the upgrade then refuses the upgraded file: `replicate` says
+the directory "already holds backups of a different database". Start a new
+directory after upgrading. The old one still restores the database as it was before
+the upgrade, so keep it as long as you might need that. The new id is deliberate: a log or journal left over
+from the old file carries the old id, and the database refuses to apply it to the
+new file rather than write old pages into it.
 
 The upgraded file is usually a little **larger**, not smaller: the new trees are
 written into new pages, and the old trees' pages go on the free list in the middle
-of the file, where `compact` cannot cut them off. Above, the file grew by 6%; a test
-database of 7.8 MB with 66,000 nodes grew by 20%, about the size of its new node
-tree. Those pages are reused as the database grows. While it runs, the command needs
-free disk space for a second copy of the database plus that growth. With a file that is already format 5 the
-command says `Id keys are already big-endian (format 5); nothing to upgrade.` and
-just compacts. It can be combined with `--upgrade-indexes`.
+of the file, where `compact` cannot cut them off (`63 pages freed for reuse`, above).
+Above, the file grew by 6%; a test database of 7.8 MB with 66,000 nodes grew by 20%,
+about the size of its new node tree. Those pages are reused as the database grows.
+
+With a file that is already format 5 the command says `Id keys are already
+big-endian (format 5); nothing to upgrade.` and just compacts. It can be combined
+with `--upgrade-indexes`.
 
 ### Keeping the changefeed in check
 

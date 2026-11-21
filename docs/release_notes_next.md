@@ -145,20 +145,31 @@ Use this file as the draft for the next release after `0.18.1`.
     (`LATTICE_ERROR_VERSION_MISMATCH`) and leave it unchanged. Keep a backup if
     an older release still has to open the data.
   - The original is replaced only after the upgraded copy has passed every
-    check. If the command is stopped part way, the path still holds a whole
-    database, the original or the upgraded one, and running the command again
-    finishes the job. It refuses while another process has the file open.
+    check, including a byte-for-byte comparison of every page the conversion
+    had no reason to change. The database stays locked from the start of the
+    command to the rename that replaces it (on Windows, until just before the
+    rename), so no other process can write to it in between. If the command is
+    stopped part way, the path still holds a whole database, the original or
+    the upgraded one, and running the command again finishes the job. It
+    refuses while another process has the file open.
+  - **What it needs.** Memory: 13 bytes per entry of the largest tree it
+    converts, held all at once (about 1.3 GB for 100 million edges), on top of
+    the page cache. Disk: room for a second copy of the database, plus the
+    growth below. Running out of either fails safely, with the copy deleted
+    and the original untouched.
   - The upgraded file is usually a little **larger**, not smaller: the old
     trees' pages are freed in the middle of the file, where `compact` cannot cut
     them off, and are reused as the database grows. A 1.9 MB file created by
     0.18.1 grew 6%, to 2.0 MB, and a 7.8 MB test database with 66,000 nodes
     grew 20%, to 9.4 MB. Expect growth of up to about the size of the node
     tree, the largest tree converted, whose new pages have to exist while its
-    old ones are read. The command needs that much free disk space beyond the
-    second copy.
-  - The upgraded file gets a new file id, so a replication directory made from
-    it before the upgrade is refused (`replicate` reports a UUID mismatch).
-    Start a new one.
+    old ones are read.
+  - **The upgraded file gets a new file id.** An existing replication
+    directory stops accepting passes: `replicate` says it "already holds
+    backups of a different database" and leaves it as it was. It still
+    restores the database as it was before the upgrade. Replicate the upgraded
+    file to a new directory. (The new id keeps a log or journal left from the
+    old file from ever being applied to the new one.)
   - Scan order changes as for a new file: a walk of the edge-ID index, as in
     `MATCH ()-[r:KNOWS]->()` with nothing else bound, now returns ascending edge
     ids.
@@ -206,9 +217,14 @@ Use this file as the draft for the next release after `0.18.1`.
   one with only nodes, one without full-text or vectors, a format-5 file (left
   alone), the refusals (open transaction, in memory, read-only, existing
   destination), a failure injected after the copy, half way through the
-  conversion and in verification (source file unchanged, no files left), a stop
-  after each step of the swap (the path opens whole and a rerun finishes), and
-  the CLI's table, JSON and CSV output.
+  conversion, in verification (two records swapped) and on a page the
+  conversion must not touch (one byte changed, checksum intact), each leaving
+  the source file unchanged and no files behind; a stop after each step of the
+  swap (the path opens whole and a rerun finishes); no other handle can open
+  the database between the upgrade's close and the rename; a second run while
+  the database is in use leaves the first run's copy alone; an old replication
+  directory refuses the upgraded file and still restores the old one, and a new
+  one works; and the CLI's table, JSON and CSV output.
 - By hand with 0.18.1: a file it created with full-text indexes, vectors and a
   property index gave the same query, search and changefeed results through
   this release's library before and after `compact --upgrade-id-keys` (except

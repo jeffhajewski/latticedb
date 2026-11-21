@@ -7,9 +7,11 @@
 //! big-endian, byte order is numeric order, new ids go on the right edge and
 //! the leaves fill.
 //!
-//! Files created before format 5 keep little-endian id keys for good: they
-//! are not converted, and every read and write on them uses the old order.
-//! A file says which order it uses in its header (`FileFlags.ORDERED_ID_KEYS`),
+//! Files created before format 5 keep little-endian id keys: opening one
+//! converts nothing, and every read and write on it uses the old order. Only
+//! `lattice compact --upgrade-id-keys` (`Database.upgradeIdKeysTo`, in
+//! `storage/id_key_upgrade.zig`) converts one, by writing a big-endian copy
+//! and putting it in the file's place; that is one-way. A file says which order it uses in its header (`FileFlags.ORDERED_ID_KEYS`),
 //! the database reads that once at open and hands the order to every store
 //! that keys a tree by id. Nothing else decides it.
 

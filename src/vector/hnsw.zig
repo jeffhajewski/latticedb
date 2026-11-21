@@ -2038,7 +2038,7 @@ pub const HnswIndex = struct {
     // ========================================================================
 
     /// Sentinel key used to store HNSW metadata in the B+Tree.
-    const METADATA_KEY = [_]u8{0xFF} ** 8;
+    pub const METADATA_KEY = [_]u8{0xFF} ** 8;
 
     /// Serialize HNSW metadata (entry_point, max_layer, vector_count, pool_heads)
     /// into a stack buffer. Returns the slice of valid bytes.

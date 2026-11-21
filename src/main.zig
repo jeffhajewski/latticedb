@@ -30,6 +30,7 @@ pub const storage = struct {
     pub const recovery = @import("storage/recovery.zig");
     pub const database = @import("storage/database.zig");
     pub const overlay_lookup = @import("storage/overlay_lookup.zig");
+    pub const id_key_upgrade = @import("storage/id_key_upgrade.zig");
 };
 
 // Durable streams

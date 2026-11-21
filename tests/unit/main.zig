@@ -34,6 +34,7 @@ test {
     // Core types
     _ = lattice.core.types;
     _ = lattice.core.id_key;
+    _ = lattice.storage.id_key_upgrade;
 
     // Storage - inline tests
     _ = lattice.storage.page;

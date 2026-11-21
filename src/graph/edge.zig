@@ -174,7 +174,7 @@ pub const EdgeStore = struct {
     const Self = @This();
     /// Key of the stored edge id counter: all zero bytes in either order,
     /// so the first key of the index.
-    const EDGE_ID_META_KEY: EdgeId = 0;
+    pub const EDGE_ID_META_KEY: EdgeId = 0;
 
     /// Initialize edge store with traversal and edge_id index B+Trees, the
     /// latter keyed in `id_keys` order.

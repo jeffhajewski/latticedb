@@ -90,7 +90,7 @@ pub const DocLengthStore = struct {
     ///
     /// Document keys are always eight bytes, so a shorter key cannot collide
     /// with one however many documents are indexed.
-    const STATS_KEY = [_]u8{ 0x00, 's', 't', 'a', 't', 's' };
+    pub const STATS_KEY = [_]u8{ 0x00, 's', 't', 'a', 't', 's' };
 
     /// Statistics as they sit in the tree.
     const StatsEntry = extern struct {
@@ -177,7 +177,7 @@ pub const DocLengthStore = struct {
     /// Key the index's analyzer settings are stored under (see
     /// `FtsIndex.analysis`). Six bytes, like the stats key, so it cannot
     /// collide with a document key; 0.16.0 never looks it up.
-    const ANALYSIS_KEY = [_]u8{ 0x00, 'a', 'n', 'l', 'y', 'z' };
+    pub const ANALYSIS_KEY = [_]u8{ 0x00, 'a', 'n', 'l', 'y', 'z' };
     pub const ANALYSIS_LEN = 4;
 
     /// The analyzer settings recorded for this index, or null if none were.

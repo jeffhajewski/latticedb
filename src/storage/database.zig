@@ -79,6 +79,7 @@ pub const BackupStats = struct {
 };
 
 const replicate_mod = @import("replicate.zig");
+pub const id_key_upgrade = lattice.storage.id_key_upgrade;
 
 const label_index_mod = lattice.graph.label_index;
 const LabelIndex = label_index_mod.LabelIndex;
@@ -1310,6 +1311,8 @@ pub const Database = struct {
     /// Test hook: fail the next commit once its changefeed is staged, before
     /// anything is logged, leaving the transaction open.
     fail_after_changefeed_staging_for_testing: bool = false,
+    /// Test hook: where `upgradeIdKeysTo` is made to fail.
+    upgrade_fault_for_testing: ?id_key_upgrade.Fault = null,
     stream_mutex: @import("compat").Mutex,
     stream_cond: @import("compat").Condition,
     stream_epoch: u64,
@@ -1850,6 +1853,7 @@ pub const Database = struct {
         self.fail_next_apply_for_testing = false;
         self.fail_apply_after_edge_keys_for_testing = null;
         self.fail_after_changefeed_staging_for_testing = false;
+        self.upgrade_fault_for_testing = null;
         self.stream_epoch = 0;
 
         // 10. Initialize Adjacency Cache (optional)
@@ -2436,6 +2440,40 @@ pub const Database = struct {
         dest_dir: []const u8,
     ) replicate_mod.ReplicateError!replicate_mod.ReplicateStats {
         return replicate_mod.replicate(self, dest_dir);
+    }
+
+    /// Write a copy of this database with big-endian id keys (format 5) to
+    /// `dest_path`, and check it, leaving this database as it is.
+    ///
+    /// For a file created before format 5, whose node, edge and document ids
+    /// are little-endian keys. The copy holds the same data with the keys
+    /// in id order, which is what a file created by this release has. It
+    /// needs a format-5 reader: 0.18 and earlier cannot open it.
+    ///
+    /// The copy is taken with `backup`, so pending work is folded into this
+    /// database's file first, as a backup does. The copy is then converted
+    /// (see `id_key_upgrade.zig`), opened the ordinary way, and compared with
+    /// this database entry by entry through the stores: nodes, edges, the
+    /// next ids, full-text lengths and reverse entries, and the vector index.
+    /// Every page of the copy must read back, and no page may belong to two
+    /// structures. If anything fails, the copy is deleted and the error
+    /// returned, with what went wrong in `diagnostic` when one is given.
+    ///
+    /// Putting the copy in this database's place is the caller's job, once
+    /// this database is closed: `id_key_upgrade.replaceWithUpgraded`, which
+    /// `lattice compact --upgrade-id-keys` uses.
+    ///
+    /// Refused for a database in memory, a read-only handle, a handle that
+    /// has failed, and while a transaction is open; nothing must write to
+    /// the database while it runs. `dest_path`, and its `-wal`, `-journal`
+    /// and `.partial` neighbours, must not exist. A database whose id keys
+    /// are already big-endian is left alone, and the stats say so.
+    pub fn upgradeIdKeysTo(
+        self: *Self,
+        dest_path: []const u8,
+        diagnostic: ?*id_key_upgrade.Diagnostic,
+    ) id_key_upgrade.UpgradeError!id_key_upgrade.UpgradeStats {
+        return id_key_upgrade.upgrade(self, dest_path, diagnostic);
     }
 
     /// Flush all durable state and remove contiguous freelist pages from EOF.

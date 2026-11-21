@@ -151,7 +151,9 @@ Use this file as the draft for the next release after `0.18.1`.
     rename), so no other process can write to it in between. If the command is
     stopped part way, the path still holds a whole database, the original or
     the upgraded one, and running the command again finishes the job. It
-    refuses while another process has the file open.
+    refuses while another process has the file open. Stop the programs that
+    use the database first: one that tries to open it during the upgrade is
+    told it is locked.
   - **What it needs.** Memory: 13 bytes per entry of the largest tree it
     converts, held all at once (about 1.3 GB for 100 million edges), on top of
     the page cache. Disk: room for a second copy of the database, plus the
@@ -159,11 +161,13 @@ Use this file as the draft for the next release after `0.18.1`.
     and the original untouched.
   - The upgraded file is usually a little **larger**, not smaller: the old
     trees' pages are freed in the middle of the file, where `compact` cannot cut
-    them off, and are reused as the database grows. A 1.9 MB file created by
-    0.18.1 grew 6%, to 2.0 MB, and a 7.8 MB test database with 66,000 nodes
-    grew 20%, to 9.4 MB. Expect growth of up to about the size of the node
-    tree, the largest tree converted, whose new pages have to exist while its
-    old ones are read.
+    them off, and are reused as the database grows. A database of 1,000,000
+    nodes and 2,000,000 edges created by 0.18.1 went from 524 MB to 576 MB
+    (+10%), in 13 to 30 seconds on a busy laptop, with 255 MB of memory at its
+    peak. One of 70,000 nodes with full-text indexes and vectors went from
+    125 MB to 133 MB (+6%) in a second, and then took 20,000 more nodes,
+    40,000 more edges and 10,000 more vectors without growing at all; a copy
+    that was not upgraded grew to 153 MB with the same additions.
   - **The upgraded file gets a new file id.** An existing replication
     directory stops accepting passes: `replicate` says it "already holds
     backups of a different database" and leaves it as it was. It still
@@ -230,6 +234,18 @@ Use this file as the draft for the next release after `0.18.1`.
   this release's library before and after `compact --upgrade-id-keys` (except
   the order of an unordered `MATCH ()-[r:R]->()`, now ascending), and 0.18.1
   then refused it, read-only and read-write, leaving its bytes unchanged.
+- A larger check across versions: 0.18.1 created a database of 70,000 nodes
+  (ids past 65,536), 150,000 edges with properties, two full-text indexes,
+  23,000 vectors, values larger than a page, deletions and a stream, and
+  dumped all of it: every node with its labels, properties and vector, every
+  edge from both ends, 50 full-text searches with scores, 25 vector searches
+  with distances, property index lookups, every changefeed event and the
+  stream. After `compact --upgrade-id-keys`, this release's dump of the
+  upgraded file is the same 367,370 lines. The same additions were then made
+  to the upgraded file and to a copy that was not upgraded, and the two dumps
+  are again the same, 472,370 lines. A database of 1,000,000 nodes and
+  2,000,000 edges created by 0.18.1 answers the same counts, checksums and
+  neighbour lists after the upgrade as 0.18.1 gave before it.
 
 - The sorted apply is held to the edge-by-edge one: transactions on either side
   of the 64-relationship threshold, in both file layouts, must leave the same

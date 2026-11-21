@@ -834,6 +834,10 @@ command is stopped part way, the path holds either the whole original or the who
 upgraded file, and running it again finishes the job. It refuses while another
 process has the database open.
 
+Stop the programs that use the database before you upgrade it. One that has it
+open keeps the upgrade from starting, and one that tries to open it during the
+upgrade is told the database is locked.
+
 **What it needs.** Memory: the conversion holds every key of the tree it is working
 on at once, 13 bytes per entry, so the largest tree decides: about 1.3 GB for a
 database with 100 million edges, on top of the page cache. Disk: room beside the
@@ -844,15 +848,24 @@ either fails like any other step, with the copy deleted and the original untouch
 directory made before the upgrade then refuses the upgraded file: `replicate` says
 the directory "already holds backups of a different database". Start a new
 directory after upgrading. The old one still restores the database as it was before
-the upgrade, so keep it as long as you might need that. The new id is deliberate: a log or journal left over
-from the old file carries the old id, and the database refuses to apply it to the
-new file rather than write old pages into it.
+the upgrade, so keep it as long as you might need that. The new id is deliberate:
+a log or journal left over from the old file carries the old id, and the database
+refuses to apply it to the new file rather than write old pages into it.
 
 The upgraded file is usually a little **larger**, not smaller: the new trees are
 written into new pages, and the old trees' pages go on the free list in the middle
 of the file, where `compact` cannot cut them off (`63 pages freed for reuse`, above).
-Above, the file grew by 6%; a test database of 7.8 MB with 66,000 nodes grew by 20%,
-about the size of its new node tree. Those pages are reused as the database grows.
+Those pages are reused as the database grows. Measured on files created by 0.18.1:
+
+| Database | Before | After | Time | Peak memory |
+|----------|--------|-------|------|-------------|
+| 1,000,000 nodes, 2,000,000 edges | 524 MB | 576 MB (+10%) | 13 to 30 s on a busy laptop | 255 MB |
+| 70,000 nodes, 150,000 edges, two full-text indexes, 23,000 vectors | 125 MB | 133 MB (+6%) | 1 s | |
+
+The second file shows the reuse. After the upgrade, 20,000 nodes, 40,000 edges and
+10,000 vectors were added to it and to a copy that was not upgraded. The upgraded
+file stayed at 133 MB, taking the new data into its freed pages. The other grew
+from 125 MB to 153 MB.
 
 With a file that is already format 5 the command says `Id keys are already
 big-endian (format 5); nothing to upgrade.` and just compacts. It can be combined

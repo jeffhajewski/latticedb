@@ -885,7 +885,7 @@ test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every out
     const built = try lupk.buildLegacy(paths[0], 0);
     var expected: lupk.Fingerprint = undefined;
     {
-        var db = try Database.open(allocator, paths[0], .{ .config = lupk.legacy_config });
+        var db = try Database.open(lupk.bulk_allocator, paths[0], .{ .config = lupk.legacy_config });
         defer db.close();
         expected = try lupk.fingerprint(db, built.last_event);
     }
@@ -929,7 +929,7 @@ test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every out
         defer info.deinit(allocator);
         try expectOutput(info, &.{ "Id keys:      big-endian", "v5, so 0.18 and earlier cannot open it" });
         try std.testing.expect(std.mem.indexOf(u8, info.stdout, "--upgrade-id-keys") == null);
-        var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+        var db = try Database.open(lupk.bulk_allocator, path, .{ .config = lupk.legacy_config });
         defer db.close();
         try std.testing.expectEqual(lattice.core.id_key.IdKeyOrder.big, db.id_key_order);
         try lupk.Fingerprint.expectEqual(expected, try lupk.fingerprint(db, built.last_event));
@@ -957,7 +957,7 @@ test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopp
         const built = try lupk.buildLegacy(path, 0);
         var expected: lupk.Fingerprint = undefined;
         {
-            var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+            var db = try Database.open(lupk.bulk_allocator, path, .{ .config = lupk.legacy_config });
             defer db.close();
             expected = try lupk.fingerprint(db, built.last_event);
         }
@@ -996,7 +996,7 @@ test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopp
         for ([_][]const u8{ copy, copy ++ "-wal", copy ++ ".partial", copy ++ "-journal" }) |name| {
             try std.testing.expect(!lupk.exists(name));
         }
-        var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+        var db = try Database.open(lupk.bulk_allocator, path, .{ .config = lupk.legacy_config });
         defer db.close();
         try std.testing.expectEqual(lattice.core.id_key.IdKeyOrder.big, db.id_key_order);
         try lupk.Fingerprint.expectEqual(expected, try lupk.fingerprint(db, built.last_event));
@@ -1012,7 +1012,7 @@ test "cli: a second compact --upgrade-id-keys while the database is in use leave
     _ = try lupk.buildLegacy(path, 0);
 
     // The first run holds the database and has a copy in progress.
-    var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+    var db = try Database.open(lupk.bulk_allocator, path, .{ .config = lupk.legacy_config });
     defer db.close();
     {
         const file = try compat.fs.cwd().createFile(copy, .{ .truncate = true });

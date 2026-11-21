@@ -864,3 +864,143 @@ test "cli: a failed export leaves no file behind" {
     try std.testing.expect(!failed.succeeded());
     try std.testing.expectError(error.FileNotFound, compat.fs.cwd().access(out, .{}));
 }
+
+const lupk = @import("lupk_upgrade_id_keys_test.zig");
+
+fn expectOutput(run: CliRun, needles: []const []const u8) !void {
+    for (needles) |needle| {
+        if (!run.succeeded() or std.mem.indexOf(u8, run.stdout, needle) == null) {
+            std.debug.print("expected {s}\nexit {?d}\nstdout: {s}\nstderr: {s}\n", .{ needle, run.exit_code, run.stdout, run.stderr });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every output format, and info points to it" {
+    const allocator = std.testing.allocator;
+    const paths = [_][]const u8{ "/tmp/lupk_cli_table.ltdb", "/tmp/lupk_cli_json.ltdb", "/tmp/lupk_cli_csv.ltdb" };
+    for (paths) |path| lupk.cleanup(path);
+    defer for (paths) |path| lupk.cleanup(path);
+
+    const built = try lupk.buildLegacy(paths[0], 0);
+    var expected: lupk.Fingerprint = undefined;
+    {
+        var db = try Database.open(allocator, paths[0], .{ .config = lupk.legacy_config });
+        defer db.close();
+        expected = try lupk.fingerprint(db, built.last_event);
+    }
+    for (paths[1..]) |path| try copyFile(allocator, paths[0], path);
+
+    // info says how to upgrade a little-endian file, and that it is one-way.
+    {
+        const info = try runCli(allocator, &.{ "info", paths[0] });
+        defer info.deinit(allocator);
+        try expectOutput(info, &.{ "Id keys:      little-endian", "'lattice compact --upgrade-id-keys' converts them (one-way" });
+    }
+
+    {
+        const run = try runCli(allocator, &.{ "compact", paths[0], "--upgrade-id-keys" });
+        defer run.deinit(allocator);
+        try expectOutput(run, &.{
+            "Upgraded the id keys of",
+            "This is one-way: 0.18 and earlier can no longer open this file.",
+            "node tree: ",
+            "full-text document lengths: ",
+            "vector index node tree: ",
+            "Entries checked: ",
+            "Compacted database",
+        });
+    }
+    {
+        const run = try runCli(allocator, &.{ "compact", paths[1], "--upgrade-id-keys", "--upgrade-indexes", "--format=json" });
+        defer run.deinit(allocator);
+        try expectOutput(run, &.{ "\"indexes_rebuilt\":", "\"id_keys_upgraded\":true,\"id_keys\":\"big-endian\",\"id_key_entries_checked\":" });
+    }
+    {
+        const run = try runCli(allocator, &.{ "compact", paths[2], "--upgrade-id-keys", "--format=csv" });
+        defer run.deinit(allocator);
+        try expectOutput(run, &.{ "path,pages_before,pages_after,pages_removed,bytes_reclaimed,id_keys_upgraded,id_keys,id_key_entries_checked,upgrade_bytes_before,upgrade_bytes_after\n", ",true,big-endian," });
+    }
+
+    for (paths) |path| {
+        var buf: [256]u8 = undefined;
+        try std.testing.expect(!lupk.exists(try std.fmt.bufPrint(&buf, "{s}.upgrade-id-keys", .{path})));
+        const info = try runCli(allocator, &.{ "info", path });
+        defer info.deinit(allocator);
+        try expectOutput(info, &.{ "Id keys:      big-endian", "v5, so 0.18 and earlier cannot open it" });
+        try std.testing.expect(std.mem.indexOf(u8, info.stdout, "--upgrade-id-keys") == null);
+        var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+        defer db.close();
+        try std.testing.expectEqual(lattice.core.id_key.IdKeyOrder.big, db.id_key_order);
+        try lupk.Fingerprint.expectEqual(expected, try lupk.fingerprint(db, built.last_event));
+    }
+
+    // Again on a format-5 file: nothing to upgrade, and it still compacts.
+    {
+        const run = try runCli(allocator, &.{ "compact", paths[0], "--upgrade-id-keys" });
+        defer run.deinit(allocator);
+        try expectOutput(run, &.{ "Id keys are already big-endian (format 5); nothing to upgrade.", "Compacted database" });
+        const json = try runCli(allocator, &.{ "compact", paths[0], "--upgrade-id-keys", "--format=json" });
+        defer json.deinit(allocator);
+        try expectOutput(json, &.{"\"id_keys_upgraded\":false"});
+    }
+}
+
+test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopped at any point" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lupk_cli_rerun.ltdb";
+    const upgrade = lattice.storage.id_key_upgrade;
+    const Stop = enum { garbage_copy, unswapped_copy, checked, sidecars_removed, renamed };
+    for (std.enums.values(Stop)) |stop| {
+        lupk.cleanup(path);
+        defer lupk.cleanup(path);
+        const built = try lupk.buildLegacy(path, 0);
+        var expected: lupk.Fingerprint = undefined;
+        {
+            var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+            defer db.close();
+            expected = try lupk.fingerprint(db, built.last_event);
+        }
+
+        const copy = path ++ ".upgrade-id-keys";
+        switch (stop) {
+            .garbage_copy => {
+                // A copy cut short, with a log beside it.
+                for ([_][]const u8{ copy, copy ++ "-wal", copy ++ ".partial" }) |name| {
+                    const file = try compat.fs.cwd().createFile(name, .{ .truncate = true });
+                    defer file.close();
+                    try file.pwriteAll("not a database", 0);
+                }
+            },
+            else => {
+                {
+                    var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+                    defer db.close();
+                    _ = try db.upgradeIdKeysTo(copy, null);
+                    _ = try db.checkpoint(.truncate);
+                }
+                const step: ?upgrade.SwapStep = switch (stop) {
+                    .checked => .checked,
+                    .sidecars_removed => .sidecars_removed,
+                    .renamed => .renamed,
+                    else => null,
+                };
+                if (step) |s| {
+                    const state = try upgrade.FileState.capture(path);
+                    try std.testing.expectError(error.StoppedForTesting, upgrade.replaceWithUpgraded(allocator, path, copy, &state, s));
+                }
+            },
+        }
+
+        const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys" });
+        defer run.deinit(allocator);
+        try expectOutput(run, &.{if (stop == .renamed) "Id keys are already big-endian" else "Upgraded the id keys of"});
+        for ([_][]const u8{ copy, copy ++ "-wal", copy ++ ".partial", copy ++ "-journal" }) |name| {
+            try std.testing.expect(!lupk.exists(name));
+        }
+        var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+        defer db.close();
+        try std.testing.expectEqual(lattice.core.id_key.IdKeyOrder.big, db.id_key_order);
+        try lupk.Fingerprint.expectEqual(expected, try lupk.fingerprint(db, built.last_event));
+    }
+}

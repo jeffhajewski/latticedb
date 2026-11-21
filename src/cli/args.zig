@@ -286,6 +286,8 @@ pub const Args = struct {
 
     /// --upgrade-indexes, for `compact`.
     upgrade_indexes: bool = false,
+    /// --upgrade-id-keys, for `compact`.
+    upgrade_id_keys: bool = false,
 
     // Remaining positional args
     positional: []const []const u8 = &.{},
@@ -392,6 +394,8 @@ pub const Args = struct {
                     args.force = true;
                 } else if (std.mem.eql(u8, arg, "--upgrade-indexes")) {
                     args.upgrade_indexes = true;
+                } else if (std.mem.eql(u8, arg, "--upgrade-id-keys")) {
+                    args.upgrade_id_keys = true;
                 } else if (std.mem.startsWith(u8, arg, "--at=")) {
                     args.at_ms = parseTimestamp(arg["--at=".len..]) orelse {
                         return error.InvalidTimestamp;
@@ -520,6 +524,18 @@ test "parse the index upgrade option for compact" {
     try std.testing.expectEqual(Command.compact, args.command.?);
     try std.testing.expectEqualStrings("test.db", args.path.?);
     try std.testing.expect(args.upgrade_indexes);
+}
+
+test "parse the id key upgrade option for compact, alone and with the index upgrade" {
+    const allocator = std.testing.allocator;
+    var plain = try Args.parse(allocator, &.{ "lattice", "compact", "test.db" });
+    defer plain.deinit(allocator);
+    try std.testing.expect(!plain.upgrade_id_keys);
+
+    var both = try Args.parse(allocator, &.{ "lattice", "compact", "test.db", "--upgrade-id-keys", "--upgrade-indexes" });
+    defer both.deinit(allocator);
+    try std.testing.expect(both.upgrade_id_keys);
+    try std.testing.expect(both.upgrade_indexes);
 }
 
 test "parse vector dimensions range" {

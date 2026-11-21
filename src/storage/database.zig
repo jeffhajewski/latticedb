@@ -2455,13 +2455,21 @@ pub const Database = struct {
     /// (see `id_key_upgrade.zig`), opened the ordinary way, and compared with
     /// this database entry by entry through the stores: nodes, edges, the
     /// next ids, full-text lengths and reverse entries, and the vector index.
-    /// Every page of the copy must read back, and no page may belong to two
-    /// structures. If anything fails, the copy is deleted and the error
-    /// returned, with what went wrong in `diagnostic` when one is given.
+    /// Every page of the copy must read back, no page may belong to two
+    /// structures, and every page the conversion had no reason to change
+    /// (vector data, postings, the trees it does not convert) must be byte
+    /// for byte the same as in this database's file. If anything fails, the
+    /// copy is deleted and the error returned, with what went wrong in
+    /// `diagnostic` when one is given.
     ///
-    /// Putting the copy in this database's place is the caller's job, once
-    /// this database is closed: `id_key_upgrade.replaceWithUpgraded`, which
-    /// `lattice compact --upgrade-id-keys` uses.
+    /// Memory: the conversion holds every key of the tree it is converting
+    /// at once, 13 bytes per entry, so the largest tree decides (about
+    /// 1.3 GB for 100 million edges). Disk: a second copy of the database,
+    /// plus the new trees. Running out of either fails like any other step.
+    ///
+    /// Putting the copy in this database's place is the caller's job:
+    /// `closeKeepingLock`, then `id_key_upgrade.replaceWithUpgraded`, which
+    /// is what `lattice compact --upgrade-id-keys` does.
     ///
     /// Refused for a database in memory, a read-only handle, a handle that
     /// has failed, and while a transaction is open; nothing must write to
@@ -2498,6 +2506,30 @@ pub const Database = struct {
     /// Close the database and release all resources.
     /// For guaranteed durability, call sync() first and handle errors.
     pub fn close(self: *Self) void {
+        _ = self.closeImpl(false);
+    }
+
+    /// Close the database but keep its file open and exclusively locked, and
+    /// return that file. Everything else `close` does happens as usual: the
+    /// log is checkpointed, every page is flushed, the stores go away. The
+    /// caller owns the file and must `unlock` and `close` it.
+    ///
+    /// Until it does, no other handle can open the database, so the file can
+    /// be replaced (`id_key_upgrade.replaceWithUpgraded`) with no moment in
+    /// which another process could open and write to it.
+    ///
+    /// Refused, with the database left open, for a read-only, in-memory,
+    /// failed or unlocked handle, or one on a VFS other than the operating
+    /// system's (whose files could not outlive it).
+    pub fn closeKeepingLock(self: *Self) DatabaseError!vfs_mod.File {
+        if (self.read_only) return DatabaseError.ReadOnly;
+        if (self.failed) return DatabaseError.IoError;
+        if (self.vfs != .posix or isMemoryPath(self.path) or self.owns_backing_file) return DatabaseError.IoError;
+        if (!self.page_manager.holdsLock()) return DatabaseError.IoError;
+        return self.closeImpl(true).?;
+    }
+
+    fn closeImpl(self: *Self, keep_lock: bool) ?vfs_mod.File {
         // Leave a file that opens without replaying anything. The C API has
         // always done this in lattice_close; the Zig API and the CLI left
         // the whole log for the next open to replay.
@@ -2575,8 +2607,10 @@ pub const Database = struct {
             }
         }
 
-        // 2. Page manager
-        self.page_manager.deinit();
+        // 2. Page manager. A PosixVfs file is its own allocation and stays
+        //    valid after the backend below goes.
+        var kept: ?vfs_mod.File = null;
+        if (keep_lock) kept = self.page_manager.deinitKeepingFile() else self.page_manager.deinit();
 
         // 1. Storage backend. A memory backend holds every byte of the database,
         //    so this is where an in-memory database actually goes away.
@@ -2599,6 +2633,7 @@ pub const Database = struct {
 
         // Free self
         self.allocator.destroy(self);
+        return kept;
     }
 
     // ========================================================================

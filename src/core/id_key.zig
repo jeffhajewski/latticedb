@@ -11,8 +11,10 @@
 //! converts nothing, and every read and write on it uses the old order. Only
 //! `lattice compact --upgrade-id-keys` (`Database.upgradeIdKeysTo`, in
 //! `storage/id_key_upgrade.zig`) converts one, by writing a big-endian copy
-//! and putting it in the file's place; that is one-way. A file says which order it uses in its header (`FileFlags.ORDERED_ID_KEYS`),
-//! the database reads that once at open and hands the order to every store
+//! and putting it in the file's place; that is one-way.
+//!
+//! A file says which order it uses in its header (`FileFlags.ORDERED_ID_KEYS`).
+//! The database reads that once at open and hands the order to every store
 //! that keys a tree by id. Nothing else decides it.
 
 const std = @import("std");

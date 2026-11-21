@@ -933,8 +933,11 @@ fn cmdCompact(
                         try stdout.print("  {s}: {d} entries, {d} pages before, {d} after\n", .{ tree.name(), t.entries, t.pages_before, t.pages_after });
                     }
                     try stdout.print("  Entries checked: {d}\n", .{k.entries_verified});
+                    try stdout.print("  Pages checked unchanged: {d}\n", .{k.pages_compared});
                     try stdout.print("  Size before:     {d} bytes\n", .{k.bytes_before});
                     try stdout.print("  Size upgraded:   {d} bytes\n", .{k.bytes_after});
+                    try stdout.print("  {d} pages freed for reuse; the file shrinks only if they are at its end.\n", .{k.pages_freed});
+                    try stdout.writeAll("  The file has a new id: replicate it to a new directory, not an old one.\n");
                 }
             }
             output.printSuccess(stdout, "Compacted database: {s}", .{path});
@@ -952,8 +955,8 @@ fn cmdCompact(
             if (upgraded) |n| try stdout.print(",\"indexes_rebuilt\":{d}", .{n});
             if (key_upgrade) |k| {
                 try stdout.print(
-                    ",\"id_keys_upgraded\":{},\"id_keys\":\"big-endian\",\"id_key_entries_checked\":{d},\"upgrade_bytes_before\":{d},\"upgrade_bytes_after\":{d}",
-                    .{ !k.already_ordered, k.entries_verified, k.bytes_before, k.bytes_after },
+                    ",\"id_keys_upgraded\":{},\"id_keys\":\"big-endian\",\"id_key_entries_checked\":{d},\"id_key_pages_freed\":{d},\"upgrade_bytes_before\":{d},\"upgrade_bytes_after\":{d}",
+                    .{ !k.already_ordered, k.entries_verified, k.pages_freed, k.bytes_before, k.bytes_after },
                 );
             }
             try stdout.writeAll("}\n");
@@ -961,14 +964,14 @@ fn cmdCompact(
         .csv => {
             try stdout.writeAll("path,pages_before,pages_after,pages_removed,bytes_reclaimed");
             if (upgraded != null) try stdout.writeAll(",indexes_rebuilt");
-            if (key_upgrade != null) try stdout.writeAll(",id_keys_upgraded,id_keys,id_key_entries_checked,upgrade_bytes_before,upgrade_bytes_after");
+            if (key_upgrade != null) try stdout.writeAll(",id_keys_upgraded,id_keys,id_key_entries_checked,id_key_pages_freed,upgrade_bytes_before,upgrade_bytes_after");
             try stdout.print(
                 "\n{s},{d},{d},{d},{d}",
                 .{ path, stats.pages_before, stats.pages_after, stats.pages_removed, stats.bytes_reclaimed },
             );
             if (upgraded) |n| try stdout.print(",{d}", .{n});
             if (key_upgrade) |k| {
-                try stdout.print(",{},big-endian,{d},{d},{d}", .{ !k.already_ordered, k.entries_verified, k.bytes_before, k.bytes_after });
+                try stdout.print(",{},big-endian,{d},{d},{d},{d}", .{ !k.already_ordered, k.entries_verified, k.pages_freed, k.bytes_before, k.bytes_after });
             }
             try stdout.writeAll("\n");
         },
@@ -993,13 +996,16 @@ fn upgradeIdKeys(allocator: std.mem.Allocator, stderr: anytype, parsed_args: *co
     const copy_path = try upgradeCopyPath(allocator, path);
     defer allocator.free(copy_path);
 
-    // A copy an earlier run left behind was never put in place: whether it
-    // is whole is not known, so it is started again.
-    IdKeyUpgrade.removeCopy(allocator, copy_path);
-
+    // Taking the database's lock first means a second run against the same
+    // database fails here, before it can touch the first run's copy.
     const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     var open = true;
     defer if (open) db.close();
+
+    // A copy an earlier run left behind was never put in place: whether it
+    // is whole is not known, so it is started again. Only the run holding
+    // the database's lock gets here.
+    IdKeyUpgrade.removeCopy(allocator, copy_path);
 
     var diagnostic = IdKeyUpgrade.Diagnostic{};
     const stats = db.upgradeIdKeysTo(copy_path, &diagnostic) catch |err| {
@@ -1017,19 +1023,19 @@ fn upgradeIdKeys(allocator: std.mem.Allocator, stderr: anytype, parsed_args: *co
         IdKeyUpgrade.removeCopy(allocator, copy_path);
         return failCommand(stderr, "Failed to upgrade the id keys of {s}; the database is as it was. Checkpoint: {s}", .{ path, @errorName(err) });
     };
-    db.close();
+    // Closed, but its file stays locked until the copy has replaced it, so
+    // no other process can open the database in between (on Windows, until
+    // just before the rename).
+    const held = db.closeKeepingLock() catch |err| {
+        IdKeyUpgrade.removeCopy(allocator, copy_path);
+        return failCommand(stderr, "Failed to upgrade the id keys of {s}; the database is as it was. Close: {s}", .{ path, @errorName(err) });
+    };
     open = false;
 
-    const closed = IdKeyUpgrade.FileState.capture(path) catch |err| {
-        IdKeyUpgrade.removeCopy(allocator, copy_path);
-        return failCommand(stderr, "Failed to upgrade the id keys of {s}; the database is as it was. {s}", .{ path, @errorName(err) });
-    };
-    IdKeyUpgrade.replaceWithUpgraded(allocator, path, copy_path, &closed, null) catch |err| {
+    IdKeyUpgrade.replaceWithUpgraded(allocator, path, copy_path, held, null) catch |err| {
         IdKeyUpgrade.removeCopy(allocator, copy_path);
         const why: []const u8 = switch (err) {
-            error.DatabaseLocked => "another process opened it",
             error.LogNotEmpty => "its log still held work after it closed",
-            error.DatabaseChanged => "it changed after the upgraded copy was made",
             else => @errorName(err),
         };
         return failCommand(stderr, "Did not replace {s} with its upgraded copy: {s}. The database is as it was.", .{ path, why });
@@ -1199,7 +1205,7 @@ fn replicationPass(
     const stats = db.replicateTo(dest) catch |err| switch (err) {
         error.UuidMismatch => return failCommand(
             stderr,
-            "{s} already holds backups of a different database",
+            "{s} already holds backups of a different database. A database upgraded with 'compact --upgrade-id-keys' counts as a different one: replicate it to a new directory (the old one still restores it as it was before the upgrade)",
             .{dest},
         ),
         error.NoWal => return failCommand(

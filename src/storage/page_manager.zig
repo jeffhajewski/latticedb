@@ -210,6 +210,21 @@ pub const PageManager = struct {
         self.deferred_free_set.deinit(self.allocator);
     }
 
+    /// Like `deinit`, but hand the file back open and still locked instead of
+    /// closing it. The caller unlocks and closes it. For replacing a closed
+    /// database's file without letting another process in between.
+    pub fn deinitKeepingFile(self: *Self) File {
+        self.holds_lock = false;
+        self.deferred_frees.deinit(self.allocator);
+        self.deferred_free_set.deinit(self.allocator);
+        return self.file;
+    }
+
+    /// Whether this handle holds the file's lock.
+    pub fn holdsLock(self: *const Self) bool {
+        return self.holds_lock;
+    }
+
     /// Initialize a new database file.
     fn initNewFile(self: *Self, id_keys: IdKeyOrder) PageManagerError!void {
         self.header = FileHeader.init(id_keys);

@@ -10,9 +10,10 @@
 //! The original is not touched until a converted copy of it has been checked.
 //! `upgrade` takes a copy with `Database.backup`, converts the copy, opens it
 //! the ordinary way and compares it with the still-open original, store by
-//! store and entry by entry. Anything wrong and the copy is deleted. Only
-//! `replaceWithUpgraded`, run after the original is closed, puts the copy
-//! in the original's place, by one rename.
+//! store and entry by entry, and every page it had no reason to change
+//! byte for byte. Anything wrong and the copy is deleted. Only
+//! `replaceWithUpgraded`, run once the original is closed (its file still
+//! locked), puts the copy in the original's place, by one rename.
 //!
 //! Because the copy is thrown away on any failure, the conversion itself
 //! does not have to survive a crash: it writes with no log and no journal.
@@ -112,6 +113,10 @@ pub const Fault = enum {
     /// Give the first two nodes each other's records, as a mistake in the key
     /// transform would. The check after the conversion must catch it.
     swap_node_values,
+    /// Change one byte of a page the conversion has no business touching (one
+    /// that holds vector data, or belongs to a tree that is not converted),
+    /// keeping its checksum valid. The page comparison must catch it.
+    scribble_untouched_page,
 };
 
 /// The five trees whose keys are ids.
@@ -171,6 +176,10 @@ pub const UpgradeStats = struct {
     /// claims (vector data, neighbour lists, postings, leaked pages).
     free_pages_after: u64 = 0,
     other_pages_after: u64 = 0,
+    /// Pages the conversion must not touch, compared byte for byte between
+    /// the source file and the copy: every page that belonged to nothing or
+    /// to a tree other than the five.
+    pages_compared: u64 = 0,
 
     pub fn tree(self: *const UpgradeStats, which: IdTree) TreeStats {
         return self.trees[@intFromEnum(which)];
@@ -434,8 +443,12 @@ const Converter = struct {
 
         // Every key, in its new form. The iterator is closed before the
         // pool is asked for anything else.
+        // Allocated once, at the size the tree reports: the whole list is
+        // held at once, `@sizeOf(NewKey)` (13) bytes per entry, and growing
+        // it by doubling would need up to twice that while it is copied.
         var keys: std.ArrayListUnmanaged(NewKey) = .empty;
         defer keys.deinit(self.allocator);
+        keys.ensureTotalCapacityPrecise(self.allocator, before.entries) catch return error.OutOfMemory;
         {
             var iter = old.range(null, null) catch |err| return self.treeFailed(tree, err);
             defer iter.deinit();
@@ -524,6 +537,11 @@ fn mapBTreeError(err: BTreeError) UpgradeError {
 /// open, in place: new trees with big-endian keys, the old ones freed, the
 /// header marked. Written without a log or journal; the caller deletes the
 /// file if this fails.
+///
+/// Returns who owned each page before the conversion (`PageAccount.owners`,
+/// as the copy was when it was made, which is the source as it is), for the
+/// verification to tell which pages must have come through unchanged. The
+/// caller frees it.
 fn convertFile(
     allocator: Allocator,
     path: []const u8,
@@ -531,7 +549,7 @@ fn convertFile(
     fault: ?Fault,
     stats: *UpgradeStats,
     diag: ?*Diagnostic,
-) UpgradeError!void {
+) UpgradeError![]u8 {
     var posix = PosixVfs.init(allocator);
     var pm = PageManager.init(allocator, posix.vfs(), path, .{}) catch |err| {
         Diagnostic.set(diag, "the copy could not be opened for conversion: {s}", .{@errorName(err)});
@@ -548,6 +566,10 @@ fn convertFile(
 
     var before = try accountPages(allocator, &bp, pm.getHeader(), diag);
     defer before.deinit();
+    // The converter marks the pages it frees in `before.owners`; this copy
+    // stays as the file was.
+    const owners_before = allocator.dupe(u8, before.owners) catch return error.OutOfMemory;
+    errdefer allocator.free(owners_before);
 
     var converter = Converter{
         .allocator = allocator,
@@ -589,6 +611,16 @@ fn convertFile(
         }
     }
 
+    if (fault == .scribble_untouched_page) scribble: {
+        for (owners_before, 0..) |owner, i| {
+            if (i == 0 or !mustBeUnchanged(owner)) continue;
+            const frame = bp.fetchPage(@intCast(i), .exclusive) catch return error.IoError;
+            frame.data[frame.data.len - 1] ^= 0xA5;
+            bp.unpinPage(frame, true);
+            break :scribble;
+        }
+    }
+
     // Only now does the file say its keys are big-endian. A new identity
     // keeps the original's log and journal, if one were ever found beside
     // this file, from being applied to it: both check the file's UUID.
@@ -602,6 +634,52 @@ fn convertFile(
 
     var after = try accountPages(allocator, &bp, pm.getHeader(), diag);
     after.deinit();
+    return owners_before;
+}
+
+/// Whether a page with this owner before the conversion must be byte for
+/// byte the same after it: anything but the header, the freelist (whose
+/// pages the conversion may reuse) and the five trees it rebuilds.
+fn mustBeUnchanged(owner: u8) bool {
+    if (owner == OWNER_HEADER or owner == OWNER_FREE) return false;
+    if (owner == OWNER_NONE) return true;
+    for (IdTree.all) |tree| {
+        if (owner == @intFromEnum(tree.treeIndex())) return false;
+    }
+    return true;
+}
+
+/// Every page that must have come through the conversion unchanged is the
+/// same, byte for byte, in the source file and in the copy. Both are read
+/// from disk. The source is as `backup` left it, quiesced, with no
+/// transaction open, so its file holds what was copied.
+fn compareUntouchedPages(src: *Database, dst: *Database, owners_before: []const u8, stats: *UpgradeStats, diag: ?*Diagnostic) UpgradeError!void {
+    const page_size = src.page_manager.getPageSize();
+    if (page_size != dst.page_manager.getPageSize()) {
+        return mismatch(diag, "the copy has a different page size", .{});
+    }
+    if (owners_before.len > src.page_manager.pageCount() or owners_before.len > dst.page_manager.pageCount()) {
+        return mismatch(diag, "the copy or the source has fewer pages than when the copy was made", .{});
+    }
+    const alignment = comptime std.mem.Alignment.fromByteUnits(4096);
+    const a = src.allocator.alignedAlloc(u8, alignment, page_size) catch return error.OutOfMemory;
+    defer src.allocator.free(a);
+    const b = src.allocator.alignedAlloc(u8, alignment, page_size) catch return error.OutOfMemory;
+    defer src.allocator.free(b);
+    for (owners_before, 0..) |owner, i| {
+        if (i == 0 or !mustBeUnchanged(owner)) continue;
+        const page_id: PageId = @intCast(i);
+        _ = src.page_manager.readPageForScan(page_id, a) catch {
+            return mismatch(diag, "page {d} of the source ({s}) does not read back", .{ page_id, treeName(owner) });
+        };
+        _ = dst.page_manager.readPageForScan(page_id, b) catch {
+            return mismatch(diag, "page {d} of the copy ({s}) does not read back", .{ page_id, treeName(owner) });
+        };
+        if (!std.mem.eql(u8, a, b)) {
+            return mismatch(diag, "page {d} ({s}) differs from the original, and the upgrade does not change it", .{ page_id, treeName(owner) });
+        }
+        stats.pages_compared += 1;
+    }
 }
 
 // ============================================================================
@@ -801,7 +879,7 @@ fn compareVectorIndex(src: *Database, dst: *Database, diag: ?*Diagnostic) Upgrad
 }
 
 /// Check the copy against the source it was made from.
-fn verifyCopy(src: *Database, dst: *Database, stats: *UpgradeStats, diag: ?*Diagnostic) UpgradeError!void {
+fn verifyCopy(src: *Database, dst: *Database, owners_before: []const u8, stats: *UpgradeStats, diag: ?*Diagnostic) UpgradeError!void {
     const header = dst.page_manager.getHeader();
     if (dst.id_key_order != .big or header.idKeyOrder() != .big or
         !header.requiresReaderFor(FileHeader.ReaderReason.ordered_id_keys))
@@ -841,6 +919,10 @@ fn verifyCopy(src: *Database, dst: *Database, stats: *UpgradeStats, diag: ?*Diag
             return mismatch(diag, "the {s} tree moved in the copy", .{@tagName(index)});
         }
     }
+
+    // Pages that hold vector data, neighbour lists, postings, or belong to
+    // a tree that is not converted, are as they were.
+    try compareUntouchedPages(src, dst, owners_before, stats, diag);
 
     var node_ids: std.ArrayListUnmanaged(u64) = .empty;
     defer node_ids.deinit(src.allocator);
@@ -919,7 +1001,8 @@ pub fn upgrade(db: *Database, dest_path: []const u8, diag: ?*Diagnostic) Upgrade
     if (db.upgrade_fault_for_testing == .after_copy) return error.IoError;
 
     const pool_bytes = @max(db.buffer_pool.frame_count * db.page_manager.getPageSize(), 1024 * 1024);
-    try convertFile(allocator, dest_path, pool_bytes, db.upgrade_fault_for_testing, &stats, diag);
+    const owners_before = try convertFile(allocator, dest_path, pool_bytes, db.upgrade_fault_for_testing, &stats, diag);
+    defer allocator.free(owners_before);
     stats.bytes_after = fileSize(dest_path);
 
     // Open the copy the ordinary way and compare it with the source.
@@ -930,7 +1013,7 @@ pub fn upgrade(db: *Database, dest_path: []const u8, diag: ?*Diagnostic) Upgrade
         return error.VerificationFailed;
     };
     defer copy.close();
-    try verifyCopy(db, copy, &stats, diag);
+    try verifyCopy(db, copy, owners_before, &stats, diag);
     return stats;
 }
 
@@ -949,34 +1032,13 @@ pub const SwapStep = enum {
 };
 
 pub const SwapError = error{
-    /// Another process has the database open.
-    DatabaseLocked,
     /// The original's log or journal still holds work, so the original is
     /// not complete on its own. Nothing was changed.
     LogNotEmpty,
-    /// The original changed after the copy was made. Nothing was changed.
-    DatabaseChanged,
     IoError,
     OutOfMemory,
     /// A test asked to stop at a `SwapStep`.
     StoppedForTesting,
-};
-
-/// The bytes of a closed database file that tell whether it changed: its
-/// header page and its size.
-pub const FileState = struct {
-    header: [4096]u8,
-    size: u64,
-
-    pub fn capture(path: []const u8) SwapError!FileState {
-        const file = compat.fs.cwd().openFile(path, .{}) catch return error.IoError;
-        defer file.close();
-        const st = file.stat() catch return error.IoError;
-        var state = FileState{ .header = undefined, .size = st.size };
-        const n = file.preadAll(&state.header, 0) catch return error.IoError;
-        if (n != state.header.len) return error.IoError;
-        return state;
-    }
 };
 
 fn sidecarSize(allocator: Allocator, path: []const u8, suffix: []const u8) SwapError!?u64 {
@@ -1000,14 +1062,17 @@ fn deleteSidecar(allocator: Allocator, path: []const u8, suffix: []const u8) Swa
     };
 }
 
-/// Put the verified copy at `upgraded_path` in place of the closed database
-/// at `path`, as one rename.
+/// Put the verified copy at `upgraded_path` in place of the database at
+/// `path`, as one rename. `held` is the original's file, still locked, as
+/// `Database.closeKeepingLock` returned it; this releases and closes it
+/// whatever happens.
 ///
 /// In order, with what a crash leaves after each step:
 ///
-/// 1. Take the original's lock and check that it is as `before` captured it
-///    after its close, and that its log and journal hold nothing. A crash:
-///    the original, untouched, and the copy beside it.
+/// 1. Check that the original's log and journal hold nothing. They were
+///    emptied by the close; this guards against a close that could not fold
+///    everything in. A crash: the original, untouched, and the copy beside
+///    it.
 /// 2. Delete the original's empty log and journal, and sync the directory.
 ///    A crash: the original without them, which is complete (they were
 ///    empty) and opens, starting a new log.
@@ -1019,43 +1084,28 @@ fn deleteSidecar(allocator: Allocator, path: []const u8, suffix: []const u8) Swa
 /// and a log with another UUID makes an open fail; the journal would be
 /// ignored, but there is no reason to leave it.
 ///
-/// On POSIX the lock is held through the rename, so no process can open the
-/// original from step 1 on. Windows cannot rename over a file that is open,
-/// so there the lock is let go just before the rename, and a process that
-/// opens the original in that moment makes the rename fail, which leaves
-/// the original as it was.
+/// On POSIX the original's lock has been held since it was opened for the
+/// upgrade and is held through the rename (it stays with the old file, which
+/// the rename unlinks), so no other handle can open the database at any
+/// point. Windows cannot rename over a file that is open, so there the lock
+/// is let go just before the rename. A process that opens the original in
+/// that moment and keeps it open makes the rename fail, which leaves the
+/// original as it was; one that opens, writes and closes within it would
+/// lose that write.
 pub fn replaceWithUpgraded(
     allocator: Allocator,
     path: []const u8,
     upgraded_path: []const u8,
-    before: *const FileState,
+    held: lattice.storage.vfs.File,
     stop_after: ?SwapStep,
 ) SwapError!void {
-    var posix = PosixVfs.init(allocator);
-    const vfs = posix.vfs();
-
-    const original = vfs.open(path, .{ .read = true, .write = true }) catch return error.IoError;
-    var held = true;
-    defer if (held) {
-        original.unlock();
-        original.close();
+    var holding = true;
+    defer if (holding) {
+        held.unlock();
+        held.close();
     };
-    const locked = original.tryLock(.exclusive) catch return error.IoError;
-    if (!locked) {
-        original.close();
-        held = false;
-        return error.DatabaseLocked;
-    }
 
-    // 1. Nothing changed since the copy, and nothing is left in the log.
-    // Read through the locked handle: on Windows the lock keeps any other
-    // handle from reading the file.
-    var now_header: [4096]u8 = undefined;
-    const now_read = original.read(0, &now_header) catch return error.IoError;
-    const now_size = original.size() catch return error.IoError;
-    if (now_read != now_header.len or now_size != before.size or !std.mem.eql(u8, &now_header, &before.header)) {
-        return error.DatabaseChanged;
-    }
+    // 1. Nothing is left in the log.
     if (try sidecarSize(allocator, path, "-wal")) |size| {
         if (size > WAL_HEADER_SIZE) return error.LogNotEmpty;
     }
@@ -1072,9 +1122,9 @@ pub fn replaceWithUpgraded(
 
     // 3. The copy takes the original's place.
     if (builtin.os.tag == .windows) {
-        original.unlock();
-        original.close();
-        held = false;
+        held.unlock();
+        held.close();
+        holding = false;
     }
     compat.fs.cwd().rename(upgraded_path, path) catch return error.IoError;
     PosixVfs.syncParentDir(path);
@@ -1084,6 +1134,10 @@ pub fn replaceWithUpgraded(
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "a key in its new form takes 13 bytes, which is what the conversion holds per entry" {
+    try std.testing.expectEqual(@as(usize, 13), @sizeOf(NewKey));
+}
 
 test "key shapes of the five id-keyed trees" {
     const P = scoped_tree.PREFIX_SIZE;

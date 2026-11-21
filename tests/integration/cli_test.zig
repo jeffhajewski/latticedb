@@ -919,7 +919,7 @@ test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every out
     {
         const run = try runCli(allocator, &.{ "compact", paths[2], "--upgrade-id-keys", "--format=csv" });
         defer run.deinit(allocator);
-        try expectOutput(run, &.{ "path,pages_before,pages_after,pages_removed,bytes_reclaimed,id_keys_upgraded,id_keys,id_key_entries_checked,upgrade_bytes_before,upgrade_bytes_after\n", ",true,big-endian," });
+        try expectOutput(run, &.{ "path,pages_before,pages_after,pages_removed,bytes_reclaimed,id_keys_upgraded,id_keys,id_key_entries_checked,id_key_pages_freed,upgrade_bytes_before,upgrade_bytes_after\n", ",true,big-endian," });
     }
 
     for (paths) |path| {
@@ -973,12 +973,7 @@ test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopp
                 }
             },
             else => {
-                {
-                    var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
-                    defer db.close();
-                    _ = try db.upgradeIdKeysTo(copy, null);
-                    _ = try db.checkpoint(.truncate);
-                }
+                const held = try lupk.upgradeCopyHeld(path, copy);
                 const step: ?upgrade.SwapStep = switch (stop) {
                     .checked => .checked,
                     .sidecars_removed => .sidecars_removed,
@@ -986,8 +981,11 @@ test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopp
                     else => null,
                 };
                 if (step) |s| {
-                    const state = try upgrade.FileState.capture(path);
-                    try std.testing.expectError(error.StoppedForTesting, upgrade.replaceWithUpgraded(allocator, path, copy, &state, s));
+                    try std.testing.expectError(error.StoppedForTesting, upgrade.replaceWithUpgraded(allocator, path, copy, held, s));
+                } else {
+                    // Stopped after the copy was verified, before the swap.
+                    held.unlock();
+                    held.close();
                 }
             },
         }
@@ -1002,5 +1000,60 @@ test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopp
         defer db.close();
         try std.testing.expectEqual(lattice.core.id_key.IdKeyOrder.big, db.id_key_order);
         try lupk.Fingerprint.expectEqual(expected, try lupk.fingerprint(db, built.last_event));
+    }
+}
+
+test "cli: a second compact --upgrade-id-keys while the database is in use leaves the first run's copy alone" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lupk_cli_second.ltdb";
+    const copy = path ++ ".upgrade-id-keys";
+    lupk.cleanup(path);
+    defer lupk.cleanup(path);
+    _ = try lupk.buildLegacy(path, 0);
+
+    // The first run holds the database and has a copy in progress.
+    var db = try Database.open(allocator, path, .{ .config = lupk.legacy_config });
+    defer db.close();
+    {
+        const file = try compat.fs.cwd().createFile(copy, .{ .truncate = true });
+        defer file.close();
+        try file.pwriteAll("a copy being written", 0);
+    }
+    const before = try lupk.hashFiles(copy, &.{""});
+
+    const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys" });
+    defer run.deinit(allocator);
+    try std.testing.expect(!run.succeeded());
+    try std.testing.expect(lupk.exists(copy));
+    try std.testing.expectEqualSlices(u8, &before, &(try lupk.hashFiles(copy, &.{""})));
+    try std.testing.expectEqual(lattice.core.id_key.IdKeyOrder.little, db.id_key_order);
+}
+
+test "cli: replicate says why it refuses a directory made before the id key upgrade" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lupk_cli_repl.ltdb";
+    const dir = "/tmp/lupk_cli_repl_dir";
+    lupk.cleanup(path);
+    compat.fs.cwd().deleteTree(dir) catch {};
+    defer {
+        lupk.cleanup(path);
+        compat.fs.cwd().deleteTree(dir) catch {};
+    }
+    _ = try lupk.buildLegacy(path, 0);
+    {
+        const run = try runCli(allocator, &.{ "replicate", path, "--to=" ++ dir });
+        defer run.deinit(allocator);
+        try expectOutput(run, &.{""});
+    }
+    {
+        const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys" });
+        defer run.deinit(allocator);
+        try expectOutput(run, &.{"The file has a new id: replicate it to a new directory, not an old one."});
+    }
+    const run = try runCli(allocator, &.{ "replicate", path, "--to=" ++ dir });
+    defer run.deinit(allocator);
+    if (run.succeeded() or std.mem.indexOf(u8, run.stderr, "--upgrade-id-keys") == null) {
+        std.debug.print("exit {?d}\nstdout: {s}\nstderr: {s}\n", .{ run.exit_code, run.stdout, run.stderr });
+        return error.TestUnexpectedResult;
     }
 }

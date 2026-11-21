@@ -462,11 +462,24 @@ pub fn upgradeInPlace(path: []const u8, config: DatabaseConfig) !upgrade.Upgrade
     };
     if (stats.already_ordered) return stats;
     _ = try db.checkpoint(.truncate);
-    db.close();
+    const held = try db.closeKeepingLock();
     open = false;
-    const state = try upgrade.FileState.capture(path);
-    try upgrade.replaceWithUpgraded(allocator, path, copy, &state, null);
+    try upgrade.replaceWithUpgraded(allocator, path, copy, held, null);
     return stats;
+}
+
+/// Write the upgraded copy of the database at `path` to `copy`, and close
+/// the database keeping its file locked, as `compact --upgrade-id-keys`
+/// does before the swap. Returns the held file.
+pub fn upgradeCopyHeld(path: []const u8, copy: []const u8) !lattice.storage.vfs.File {
+    var db = try Database.open(allocator, path, .{ .config = legacy_config });
+    var open = true;
+    defer if (open) db.close();
+    _ = try db.upgradeIdKeysTo(copy, null);
+    _ = try db.checkpoint(.truncate);
+    const held = try db.closeKeepingLock();
+    open = false;
+    return held;
 }
 
 fn expectAscending(ids: []const u64) !void {
@@ -799,7 +812,7 @@ test "upgrade id keys: a failure at any stage leaves the source file byte for by
     }
     try std.testing.expectEqualSlices(u8, &settled, &(try hashMain(path)));
 
-    const faults = [_]upgrade.Fault{ .after_copy, .mid_conversion, .swap_node_values };
+    const faults = [_]upgrade.Fault{ .after_copy, .mid_conversion, .swap_node_values, .scribble_untouched_page };
     for (faults) |fault| {
         {
             var db = try Database.open(allocator, path, .{ .config = legacy_config });
@@ -812,6 +825,14 @@ test "upgrade id keys: a failure at any stage leaves the source file byte for by
                 // in the node tree, before the stores are even asked.
                 try std.testing.expectError(error.VerificationFailed, result);
                 try std.testing.expectEqualStrings("an entry of the node tree has a different value in the copy", diag.message());
+            } else if (fault == .scribble_untouched_page) {
+                // One changed byte, checksum intact, on a page none of the
+                // five trees owns: only the page comparison sees it.
+                try std.testing.expectError(error.VerificationFailed, result);
+                if (std.mem.indexOf(u8, diag.message(), "differs from the original, and the upgrade does not change it") == null) {
+                    std.debug.print("diagnostic: {s}\n", .{diag.message()});
+                    return error.TestUnexpectedResult;
+                }
             } else {
                 try std.testing.expectError(error.IoError, result);
             }
@@ -851,17 +872,8 @@ test "upgrade id keys: the swap leaves a whole database at the path after a stop
 
         var copy_buf: [256]u8 = undefined;
         const copy = try std.fmt.bufPrint(&copy_buf, "{s}.upgrade-id-keys", .{path});
-        {
-            var db = try Database.open(allocator, path, .{ .config = legacy_config });
-            var open = true;
-            defer if (open) db.close();
-            _ = try db.upgradeIdKeysTo(copy, null);
-            _ = try db.checkpoint(.truncate);
-            db.close();
-            open = false;
-        }
-        const state = try upgrade.FileState.capture(path);
-        try std.testing.expectError(error.StoppedForTesting, upgrade.replaceWithUpgraded(allocator, path, copy, &state, step));
+        const held = try upgradeCopyHeld(path, copy);
+        try std.testing.expectError(error.StoppedForTesting, upgrade.replaceWithUpgraded(allocator, path, copy, held, step));
 
         // Whichever file is at the path, it opens whole.
         const renamed = step.? == .renamed;
@@ -886,48 +898,121 @@ test "upgrade id keys: the swap leaves a whole database at the path after a stop
     }
 }
 
-test "upgrade id keys: the swap refuses a database that changed, one still logging, and one another handle holds" {
-    const path = "/tmp/lupk_swap_refuse.ltdb";
+test "upgrade id keys: the database stays locked from the upgrade's open to the rename, and a log with work in it stops the swap" {
+    const path = "/tmp/lupk_swap_lock.ltdb";
     cleanup(path);
     defer cleanup(path);
-    _ = try buildLegacy(path, 0);
+    const built = try buildLegacy(path, 0);
     var copy_buf: [256]u8 = undefined;
     const copy = try std.fmt.bufPrint(&copy_buf, "{s}.upgrade-id-keys", .{path});
-    {
-        var db = try Database.open(allocator, path, .{ .config = legacy_config });
-        defer db.close();
-        _ = try db.upgradeIdKeysTo(copy, null);
-        _ = try db.checkpoint(.truncate);
-    }
-    const state = try upgrade.FileState.capture(path);
 
-    // Held by another handle.
+    // Closed, but held: no other handle gets in, to write or to read.
     {
-        var db = try Database.open(allocator, path, .{ .config = legacy_config });
-        defer db.close();
-        try std.testing.expectError(error.DatabaseLocked, upgrade.replaceWithUpgraded(allocator, path, copy, &state, null));
-    }
-    // Written to after the copy was made (the open and close above may have
-    // changed nothing; this write certainly does).
-    {
-        var db = try Database.open(allocator, path, .{ .config = legacy_config });
-        defer db.close();
-        _ = try db.createNode(null, &.{"Late"});
-    }
-    try std.testing.expectError(error.DatabaseChanged, upgrade.replaceWithUpgraded(allocator, path, copy, &state, null));
+        const held = try upgradeCopyHeld(path, copy);
+        var released = false;
+        defer if (!released) {
+            held.unlock();
+            held.close();
+        };
+        try std.testing.expectError(error.DatabaseLocked, Database.open(allocator, path, .{ .config = legacy_config }));
+        try std.testing.expectError(error.DatabaseLocked, Database.open(allocator, path, .{ .read_only = true, .config = legacy_config }));
 
-    // A log with frames in it.
-    const kept = try upgrade.FileState.capture(path);
-    {
-        var buf: [256]u8 = undefined;
-        const wal = try std.fmt.bufPrint(&buf, "{s}-wal", .{path});
-        const file = try compat.fs.cwd().createFile(wal, .{ .truncate = false });
-        defer file.close();
-        const size = (try file.stat()).size;
-        const extra = [_]u8{1} ** 8192;
-        try file.pwriteAll(&extra, @max(size, lattice.storage.wal.WAL_HEADER_SIZE));
+        // A log with frames in it, as a close that could not fold everything
+        // in would leave. The swap refuses and lets go of the file.
+        {
+            var buf: [256]u8 = undefined;
+            const wal = try std.fmt.bufPrint(&buf, "{s}-wal", .{path});
+            const file = try compat.fs.cwd().createFile(wal, .{ .truncate = false });
+            defer file.close();
+            const size = (try file.stat()).size;
+            const extra = [_]u8{1} ** 8192;
+            try file.pwriteAll(&extra, @max(size, lattice.storage.wal.WAL_HEADER_SIZE));
+        }
+        released = true;
+        try std.testing.expectError(error.LogNotEmpty, upgrade.replaceWithUpgraded(allocator, path, copy, held, null));
     }
-    try std.testing.expectError(error.LogNotEmpty, upgrade.replaceWithUpgraded(allocator, path, copy, &kept, null));
     try std.testing.expect(exists(copy));
     try std.testing.expectEqual(IdKeyOrder.little, (try readHeader(path)).idKeyOrder());
+
+    // Released: the original opens again. (The scribbled log is not a log
+    // this file wrote, so it goes first.)
+    {
+        var buf: [256]u8 = undefined;
+        compat.fs.cwd().deleteFile(try std.fmt.bufPrint(&buf, "{s}-wal", .{path})) catch {};
+    }
+    upgrade.removeCopy(allocator, copy);
+    var expected: Fingerprint = undefined;
+    {
+        var db = try Database.open(allocator, path, .{ .config = legacy_config });
+        defer db.close();
+        expected = try fingerprint(db, built.last_event);
+    }
+
+    // And a swap that goes through holds the lock to the end: the held
+    // handle is the one the rename replaces.
+    {
+        const held = try upgradeCopyHeld(path, copy);
+        try std.testing.expectError(error.DatabaseLocked, Database.open(allocator, path, .{ .config = legacy_config }));
+        try upgrade.replaceWithUpgraded(allocator, path, copy, held, null);
+    }
+    try expectFormat5(path);
+    var db = try Database.open(allocator, path, .{ .config = legacy_config });
+    defer db.close();
+    try Fingerprint.expectEqual(expected, try fingerprint(db, built.last_event));
+}
+
+test "upgrade id keys: a replication directory of the old file refuses the upgraded one and still restores, and a new directory works" {
+    const path = "/tmp/lupk_repl.ltdb";
+    const old_dir = "/tmp/lupk_repl_old";
+    const new_dir = "/tmp/lupk_repl_new";
+    const restored = "/tmp/lupk_repl_restored.ltdb";
+    cleanup(path);
+    cleanup(restored);
+    compat.fs.cwd().deleteTree(old_dir) catch {};
+    compat.fs.cwd().deleteTree(new_dir) catch {};
+    defer {
+        cleanup(path);
+        cleanup(restored);
+        compat.fs.cwd().deleteTree(old_dir) catch {};
+        compat.fs.cwd().deleteTree(new_dir) catch {};
+    }
+
+    const built = try buildLegacy(path, 0);
+    var expected: Fingerprint = undefined;
+    {
+        var db = try Database.open(allocator, path, .{ .config = legacy_config });
+        defer db.close();
+        expected = try fingerprint(db, built.last_event);
+        _ = try db.replicateTo(old_dir);
+    }
+    const manifest_before = try hashFiles(old_dir ++ "/manifest.json", &.{""});
+
+    _ = try upgradeInPlace(path, legacy_config);
+
+    {
+        var db = try Database.open(allocator, path, .{ .config = legacy_config });
+        defer db.close();
+        try std.testing.expectError(error.UuidMismatch, db.replicateTo(old_dir));
+        _ = try db.replicateTo(new_dir);
+    }
+    try std.testing.expectEqualSlices(u8, &manifest_before, &(try hashFiles(old_dir ++ "/manifest.json", &.{""})));
+
+    // The old directory still restores the database as it was before.
+    _ = try lattice.storage.restore.restore(allocator, old_dir, restored, .{});
+    {
+        var db = try Database.open(allocator, restored, .{ .config = legacy_config });
+        defer db.close();
+        try std.testing.expectEqual(IdKeyOrder.little, db.id_key_order);
+        try Fingerprint.expectEqual(expected, try fingerprint(db, built.last_event));
+    }
+    cleanup(restored);
+
+    // The new one restores the upgraded database.
+    _ = try lattice.storage.restore.restore(allocator, new_dir, restored, .{});
+    {
+        var db = try Database.open(allocator, restored, .{ .config = legacy_config });
+        defer db.close();
+        try std.testing.expectEqual(IdKeyOrder.big, db.id_key_order);
+        try Fingerprint.expectEqual(expected, try fingerprint(db, built.last_event));
+    }
 }

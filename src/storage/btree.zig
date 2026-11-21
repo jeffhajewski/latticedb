@@ -2556,6 +2556,69 @@ pub const BTree = struct {
         }
     }
 
+    /// What a page is to the tree that owns it.
+    pub const PageKind = enum { internal, leaf, overflow };
+
+    /// Call `visitor.visit(page_id, kind)` once for every page the tree owns:
+    /// its internal pages, its leaves, and every page of every overflow chain
+    /// a leaf points to. Reads only.
+    ///
+    /// Every page is checked to be the kind its parent says it is, and every
+    /// overflow chain to be as long as its descriptor says, so a walk that
+    /// meets a page another structure owns, or a freed page, fails with
+    /// `InvalidPage` rather than reporting it as the tree's. `visit` returns
+    /// a `BTreeError`; an error ends the walk and is returned as it is.
+    pub fn forEachPage(self: *Self, visitor: anytype) BTreeError!void {
+        try self.visitPages(self.root_page, 1, visitor);
+    }
+
+    fn visitPages(self: *Self, page_id: PageId, depth: u32, visitor: anytype) BTreeError!void {
+        if (depth > MAX_TREE_HEIGHT) return BTreeError.InvalidPage;
+        if (page_id == NULL_PAGE) return BTreeError.InvalidPage;
+        const frame = self.bp.fetchPage(page_id, .shared) catch return BTreeError.BufferPoolFull;
+        defer self.bp.unpinPage(frame, false);
+        const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+        switch (header.page_type) {
+            .btree_leaf => {
+                try visitor.visit(page_id, .leaf);
+                const count = LeafNode.getNumEntries(frame.data);
+                for (0..count) |i| {
+                    const entry = LeafNode.getStoredEntry(frame.data, @intCast(i));
+                    if (!entry.overflow) continue;
+                    const desc = try parseOverflowDescriptor(entry.value);
+                    try self.visitOverflowChain(desc.first_page, desc.page_count, visitor);
+                }
+            },
+            .btree_internal => {
+                try visitor.visit(page_id, .internal);
+                const num_keys = InternalNode.getNumKeys(frame.data);
+                var i: u16 = 0;
+                while (i <= num_keys) : (i += 1) {
+                    try self.visitPages(internalChildAt(frame.data, i), depth + 1, visitor);
+                }
+            },
+            else => return BTreeError.InvalidPage,
+        }
+    }
+
+    fn visitOverflowChain(self: *Self, first_page: PageId, page_count: u32, visitor: anytype) BTreeError!void {
+        var page_id = first_page;
+        var seen: u32 = 0;
+        while (seen < page_count) : (seen += 1) {
+            if (page_id == NULL_PAGE) return BTreeError.InvalidPage;
+            const frame = self.bp.fetchPage(page_id, .shared) catch return BTreeError.BufferPoolFull;
+            const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+            const magic = std.mem.readInt(u32, frame.data[@sizeOf(PageHeader)..][0..4], .little);
+            const next_page = std.mem.readInt(u32, frame.data[@sizeOf(PageHeader) + 4 ..][0..4], .little);
+            const is_overflow = header.page_type == .overflow and magic == OVERFLOW_PAGE_MAGIC;
+            self.bp.unpinPage(frame, false);
+            if (!is_overflow) return BTreeError.InvalidPage;
+            try visitor.visit(page_id, .overflow);
+            page_id = next_page;
+        }
+        if (page_id != NULL_PAGE) return BTreeError.InvalidPage;
+    }
+
     /// Create an iterator for range scanning
     pub fn range(self: *Self, start_key: ?[]const u8, end_key: ?[]const u8) BTreeError!Iterator {
         // Find the starting leaf

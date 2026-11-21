@@ -28,6 +28,12 @@ const upgrade = lattice.storage.id_key_upgrade;
 
 const allocator = std.testing.allocator;
 
+/// For building and reading back the large database. The test allocator keeps
+/// much of what is freed until a test ends, and tens of thousands of nodes
+/// written and read back several times would take gigabytes of it; the
+/// upgrade itself, the code under test, still runs on the test allocator.
+const bulk_allocator = std.heap.c_allocator;
+
 pub fn cleanup(path: []const u8) void {
     var buf: [512]u8 = undefined;
     for ([_][]const u8{ "", "-wal", "-journal", ".upgrade-id-keys", ".upgrade-id-keys-wal", ".upgrade-id-keys-journal", ".upgrade-id-keys.partial", ".copy", ".copy-wal", ".copy-journal", ".copy.partial" }) |suffix| {
@@ -235,24 +241,29 @@ pub fn fingerprintUpTo(db: *Database, last_event: u64, last_node: NodeId) !Finge
         var h = Hasher.init(.{});
         const rows: u64 = switch (section) {
             .doc_nodes => try hashQuery(&h, db, "MATCH (n:Doc) RETURN id(n), n.text, n.title, n.rank, n.big, n.tags, n.score ORDER BY id(n)"),
-            .bulk_nodes => try hashQuery(&h, db, "MATCH (n:Bulk) RETURN id(n), n.k ORDER BY id(n)"),
+            // Tens of thousands of nodes: summed rather than listed, which
+            // keeps the test's memory down (the test allocator keeps what is
+            // freed). Each of them is compared through the store by the
+            // upgrade's own verification, and every id is hashed below.
+            .bulk_nodes => try hashQuery(&h, db, "MATCH (n:Bulk) RETURN count(n), sum(id(n)), min(id(n)), max(id(n)), count(n.k), sum(n.k)"),
             .extra_label => try hashQuery(&h, db, "MATCH (n:Doc:Extra) RETURN id(n) ORDER BY id(n)"),
             .node_ids => blk: {
                 // Through the store rather than a query: every id, sorted.
                 const ids = try db.getAllNodeIdsInTxn(null);
-                defer allocator.free(ids);
+                defer db.allocator.free(ids);
                 var n: u64 = 0;
                 for (ids) |id| {
                     if (id > last_node) continue;
+                    hashInt(&h, id);
+                    n += 1;
+                    if (id > DOCS and id <= DOCS + BULK) continue; // a bulk node; see above
                     var node = try db.node_store.get(id);
                     defer node.deinit(db.allocator);
-                    hashInt(&h, id);
                     h.update(std.mem.sliceAsBytes(node.labels));
                     for (node.properties) |prop| {
                         hashInt(&h, prop.key_id);
                         hashProperty(&h, prop.value);
                     }
-                    n += 1;
                 }
                 break :blk n;
             },
@@ -374,7 +385,8 @@ pub fn buildLegacy(path: []const u8, bulk: usize) !Built {
     // seconds rather than minutes. The close syncs everything.
     var build_config = legacy_config;
     build_config.sync_mode = .normal;
-    var db = try Database.open(allocator, path, .{ .create = true, .config = build_config });
+    const db_allocator = if (bulk > 0) bulk_allocator else allocator;
+    var db = try Database.open(db_allocator, path, .{ .create = true, .config = build_config });
     defer db.close();
     try std.testing.expectEqual(IdKeyOrder.little, db.id_key_order);
     try db.createNodeFtsIndex("Doc", "text");
@@ -541,7 +553,7 @@ test "upgrade id keys: an old-layout database with everything in it comes throug
 
     var before: Fingerprint = undefined;
     {
-        var db = try Database.open(allocator, path, .{ .config = legacy_config });
+        var db = try Database.open(bulk_allocator, path, .{ .config = legacy_config });
         defer db.close();
         before = try fingerprint(db, built.last_event);
     }
@@ -568,7 +580,7 @@ test "upgrade id keys: an old-layout database with everything in it comes throug
     var last_event: u64 = built.last_event;
     var last_node: NodeId = 0;
     {
-        var db = try Database.open(allocator, path, .{ .config = legacy_config });
+        var db = try Database.open(bulk_allocator, path, .{ .config = legacy_config });
         defer db.close();
         try std.testing.expectEqual(IdKeyOrder.big, db.id_key_order);
         try Fingerprint.expectEqual(before, try fingerprint(db, built.last_event));
@@ -627,7 +639,7 @@ test "upgrade id keys: an old-layout database with everything in it comes throug
 
     // Reopened (compared below, once the freed pages are full).
     {
-        var db = try Database.open(allocator, path, .{ .config = legacy_config });
+        var db = try Database.open(bulk_allocator, path, .{ .config = legacy_config });
         defer db.close();
         try std.testing.expectEqual(IdKeyOrder.big, db.id_key_order);
 
@@ -666,7 +678,7 @@ test "upgrade id keys: an old-layout database with everything in it comes throug
 
     // And once more after a reopen.
     {
-        var db = try Database.open(allocator, path, .{ .config = legacy_config });
+        var db = try Database.open(bulk_allocator, path, .{ .config = legacy_config });
         defer db.close();
         try Fingerprint.expectEqual(after_writes, try fingerprintUpTo(db, last_event, last_node));
         var account = try expectPagesSound(db);

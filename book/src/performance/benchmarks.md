@@ -37,7 +37,10 @@ That day's figures are not in the tables. The machine was in use, and both
 builds measured behind this page: by a few percent on the small workloads, and by
 15 to 30% on traversal and vector search at 100,000, the two that do not fit the
 processor's cache. The builds agreed with each other, so the tables keep the
-quieter 0.17.0 run.
+quieter 0.17.0 run. To be sure it was the day and not the releases, 0.17.0 itself
+was run in rotation with 0.18.1 and the new build that afternoon: all three
+measured the same on those two workloads, about 9.0 us for two hops and 130 to
+140 us for a vector search.
 
 ## Writes
 

@@ -149,6 +149,7 @@ pub fn main(init: std.process.Init) !u8 {
             error.InvalidChangefeedRetention => output.printError(stderr, "Invalid --changefeed. Use: all, off, last:<events> or age:<duration> (such as age:7d, age:12h, age:30m).", .{}),
             error.VectorOptionWithoutEnableVector => output.printError(stderr, "--vector-dims, --vector-metric, --vector-m and --vector-ef-construction need --enable-vector.", .{}),
             error.IntervalWithoutFollow => output.printError(stderr, "--interval needs --follow.", .{}),
+            error.ApplyWithoutUpgradeIdKeys => output.printError(stderr, "--apply goes with 'compact --upgrade-id-keys'.", .{}),
             error.InvalidCacheSize => output.printError(stderr, "Invalid cache size. Must be a positive integer.", .{}),
             error.InvalidAutoCheckpoint => output.printError(stderr, "Invalid --auto-checkpoint. Must be a whole number of log frames, 0 for none.", .{}),
             error.InvalidPageSize => output.printError(stderr, "Invalid page size. Must be in the range 4096..65535 bytes.", .{}),
@@ -899,10 +900,10 @@ fn cmdCompact(
 
     // First, before anything else opens the file: the upgraded copy takes
     // the original's place, and the rest of compact runs on it.
-    const key_upgrade: ?IdKeyUpgradeStats = if (parsed_args.upgrade_id_keys)
-        try upgradeIdKeys(allocator, stderr, parsed_args)
-    else
-        null;
+    const key_upgrade: ?IdKeyUpgradeStats = if (parsed_args.upgrade_id_keys) upgrade: {
+        if (!parsed_args.apply) try confirmIdKeyUpgrade(allocator, stderr, parsed_args);
+        break :upgrade try upgradeIdKeys(allocator, stderr, parsed_args);
+    } else null;
 
     const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
@@ -985,6 +986,42 @@ const IdKeyUpgradeStats = IdKeyUpgrade.UpgradeStats;
 /// database, so the rename that replaces it stays on one filesystem.
 fn upgradeCopyPath(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return std.fmt.allocPrint(allocator, "{s}.upgrade-id-keys", .{path});
+}
+
+/// `compact --upgrade-id-keys` without `--apply`: say what the upgrade costs
+/// and stop, with the database untouched. The upgrade cannot be undone and
+/// ends replication to the directories the database has, so it takes a
+/// second, explicit word. A file that is already format 5 has nothing to
+/// agree to, and returns for the rest of compact to run.
+fn confirmIdKeyUpgrade(allocator: std.mem.Allocator, stderr: anytype, parsed_args: *const Args) !void {
+    const path = parsed_args.path.?;
+    const megabytes = megabytes: {
+        // Read-only: finding out what the file is must not change it.
+        const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
+        defer db.close();
+        if (db.id_key_order == .big) return;
+        const bytes = @as(u64, db.page_manager.pageCount()) * db.page_manager.getPageSize();
+        break :megabytes (bytes + 999_999) / 1_000_000;
+    };
+
+    try stderr.print(
+        \\{s} has not been changed. Upgrading it to format 5 needs --apply.
+        \\
+        \\Before you go ahead:
+        \\  - It cannot be undone. LatticeDB 0.18 and earlier cannot open the
+        \\    upgraded file.
+        \\  - Replication starts over. The upgraded file gets a new id, so a
+        \\    directory 'lattice replicate' already writes to will refuse it.
+        \\    Replicate to a new, empty directory afterwards. The old directory
+        \\    still restores the database as it was before the upgrade.
+        \\  - It needs room on disk for a second copy of the database (about
+        \\    {d} MB), and no other program may have the database open.
+        \\
+        \\Are you sure? To continue, run:
+        \\  lattice compact {s} --upgrade-id-keys --apply
+        \\
+    , .{ path, megabytes, path });
+    return error.CommandFailed;
 }
 
 /// Upgrade the database's id keys to big-endian and put the upgraded file in
@@ -2515,10 +2552,16 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\                        a new database has. The upgrade is written
             \\                        to a copy, checked against the original,
             \\                        and only then put in its place. One-way:
-            \\                        0.18 and earlier cannot open the result.
+            \\                        0.18 and earlier cannot open the result,
+            \\                        and the file gets a new id, so replication
+            \\                        has to start again in a new directory.
+            \\  --apply               Go ahead with --upgrade-id-keys. Without
+            \\                        it the command says what the upgrade costs
+            \\                        and changes nothing.
             \\
-            \\Example:
+            \\Examples:
             \\  lattice compact mydb.lattice
+            \\  lattice compact mydb.lattice --upgrade-id-keys --apply
             \\
         ) catch {},
         .check => writer.writeAll(

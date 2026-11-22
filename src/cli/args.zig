@@ -288,6 +288,9 @@ pub const Args = struct {
     upgrade_indexes: bool = false,
     /// --upgrade-id-keys, for `compact`.
     upgrade_id_keys: bool = false,
+    /// --apply, for `compact --upgrade-id-keys`: without it the command says
+    /// what the upgrade costs and changes nothing.
+    apply: bool = false,
 
     // Remaining positional args
     positional: []const []const u8 = &.{},
@@ -396,6 +399,8 @@ pub const Args = struct {
                     args.upgrade_indexes = true;
                 } else if (std.mem.eql(u8, arg, "--upgrade-id-keys")) {
                     args.upgrade_id_keys = true;
+                } else if (std.mem.eql(u8, arg, "--apply")) {
+                    args.apply = true;
                 } else if (std.mem.startsWith(u8, arg, "--at=")) {
                     args.at_ms = parseTimestamp(arg["--at=".len..]) orelse {
                         return error.InvalidTimestamp;
@@ -449,6 +454,7 @@ pub const Args = struct {
             return error.VectorOptionWithoutEnableVector;
         }
         if (args.interval_set and !args.follow) return error.IntervalWithoutFollow;
+        if (args.apply and !args.upgrade_id_keys) return error.ApplyWithoutUpgradeIdKeys;
 
         args.positional = try positional.toOwnedSlice();
         return args;
@@ -470,6 +476,7 @@ pub const Error = error{
     InvalidChangefeedRetention,
     VectorOptionWithoutEnableVector,
     IntervalWithoutFollow,
+    ApplyWithoutUpgradeIdKeys,
     InvalidCacheSize,
     InvalidAutoCheckpoint,
     InvalidPageSize,
@@ -536,6 +543,18 @@ test "parse the id key upgrade option for compact, alone and with the index upgr
     defer both.deinit(allocator);
     try std.testing.expect(both.upgrade_id_keys);
     try std.testing.expect(both.upgrade_indexes);
+    try std.testing.expect(!both.apply);
+}
+
+test "parse --apply, which only goes with the id key upgrade" {
+    const allocator = std.testing.allocator;
+    var args = try Args.parse(allocator, &.{ "lattice", "compact", "test.db", "--upgrade-id-keys", "--apply" });
+    defer args.deinit(allocator);
+    try std.testing.expect(args.upgrade_id_keys);
+    try std.testing.expect(args.apply);
+
+    try std.testing.expectError(error.ApplyWithoutUpgradeIdKeys, Args.parse(allocator, &.{ "lattice", "compact", "test.db", "--apply" }));
+    try std.testing.expectError(error.ApplyWithoutUpgradeIdKeys, Args.parse(allocator, &.{ "lattice", "compact", "test.db", "--upgrade-indexes", "--apply" }));
 }
 
 test "parse vector dimensions range" {

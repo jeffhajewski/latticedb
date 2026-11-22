@@ -156,6 +156,37 @@ Do not reach for `--no-lock` to work around this. It exists for filesystems wher
 locking does not work, and it does not make two processes safe — it only removes
 the thing that was going to tell you they were not.
 
+### After upgrading a database to format 5
+
+`lattice compact --upgrade-id-keys --apply` rewrites a database created by 0.18 or
+earlier into the format-5 layout
+([Upgrading an older file to format 5](../getting-started/cli.md#upgrading-an-older-file-to-format-5)).
+The upgraded file gets a new id, and a destination remembers the id of the
+database it belongs to. So the directory you were replicating to refuses the
+upgraded file:
+
+```text
+Error: /mnt/backup/social already holds backups of a different database. A
+database upgraded with 'compact --upgrade-id-keys' counts as a different one:
+replicate it to a new directory (the old one still restores it as it was before
+the upgrade)
+```
+
+Nothing in the old directory is touched by that refusal. What to do:
+
+1. Replicate the upgraded database to a new, empty directory, and point whatever
+   runs `replicate` on a schedule at it. The first pass there is a full snapshot.
+2. Keep the old directory for as long as you might want the database as it was
+   before the upgrade. `lattice restore` on it still works, and gives you a file
+   0.18 can open.
+
+The upgrade command tells you this before it changes anything: without `--apply` it
+prints the notice and stops.
+
+The new id is deliberate. A log or journal left beside the old file carries the old
+id, and the database will not apply either to a file with a different one. Without
+that, a leftover log could write pre-upgrade pages into the upgraded file.
+
 ## Getting a database back
 
 `restore` turns a replication directory back into a database:

@@ -8,8 +8,9 @@ Use this file as the draft for the next release after `0.18.1`.
   which makes loading faster and the file smaller. **0.18.x and earlier cannot
   open a database this release creates.** Existing databases are not changed
   and stay readable by the releases that could read them before.
-  `lattice compact --upgrade-id-keys` converts one to format 5 if you want the
-  new layout; it is optional and one-way.
+  `lattice compact --upgrade-id-keys --apply` converts one to format 5 if you
+  want the new layout; it is optional and one-way, and replication of the
+  upgraded file has to start again in a new directory.
 - A commit that creates many relationships files them in key order, so a bulk
   load gets faster the larger its transactions are: 1M nodes and 2M
   relationships with the default settings load in 11.3 s at 100,000 rows per
@@ -32,9 +33,12 @@ Use this file as the draft for the next release after `0.18.1`.
   the default load went from about 35 s to 27 s, a load without the log from
   8 s to 6.3 s, the node tree from 70.6 MB to 51.9 MB and the edge-ID index from
   100 MB to 69 MB (both 99% full, from 73% and 69%).
-- **Older files can be upgraded to the new layout.** `lattice compact
-  --upgrade-id-keys <path>` converts a database created by 0.18.1 or earlier to
-  format 5. You do not have to: an existing database keeps working with this
+- **Older files can be upgraded to the new layout.** `lattice compact <path>
+  --upgrade-id-keys --apply` converts a database created by 0.18.1 or earlier
+  to format 5. Without `--apply` the command changes nothing: it says that the
+  upgrade cannot be undone and that replication has to start over in a new
+  directory, and asks you to run it again with `--apply` if you are sure. You
+  do not have to upgrade: an existing database keeps working with this
   release as it is. Upgrading gives it what a new file has, scans in ascending
   id order and full id trees. The command writes the upgraded database to a
   copy beside the original, checks the copy against the original (every node,
@@ -138,9 +142,14 @@ Use this file as the draft for the next release after `0.18.1`.
   same number as before for files that already had it, and it is what keeps
   older files open to 0.17 and 0.18.
 - **Upgrading an existing database is optional.** It keeps working with this
-  release in its old layout. `lattice compact --upgrade-id-keys <path>`
+  release in its old layout. `lattice compact <path> --upgrade-id-keys --apply`
   converts it to format 5 (it can be combined with `--upgrade-indexes`). What to
   know before running it:
+  - **It needs `--apply`.** Without it the command opens the database
+    read-only, prints the two costs below that cannot be taken back (one-way,
+    and replication starting over), changes nothing and exits with status 1.
+    A file that is already format 5 has nothing to agree to and is just
+    compacted.
   - **It is one-way.** 0.18, 0.17 and 0.16.0 refuse the upgraded file
     (`LATTICE_ERROR_VERSION_MISMATCH`) and leave it unchanged. Keep a backup if
     an older release still has to open the data.
@@ -172,7 +181,8 @@ Use this file as the draft for the next release after `0.18.1`.
     directory stops accepting passes: `replicate` says it "already holds
     backups of a different database" and leaves it as it was. It still
     restores the database as it was before the upgrade. Replicate the upgraded
-    file to a new directory. (The new id keeps a log or journal left from the
+    file to a new directory, and change whatever runs `replicate` on a
+    schedule to point at it. (The new id keeps a log or journal left from the
     old file from ever being applied to the new one.)
   - Scan order changes as for a new file: a walk of the edge-ID index, as in
     `MATCH ()-[r:KNOWS]->()` with nothing else bound, now returns ascending edge
@@ -228,7 +238,9 @@ Use this file as the draft for the next release after `0.18.1`.
   the database between the upgrade's close and the rename; a second run while
   the database is in use leaves the first run's copy alone; an old replication
   directory refuses the upgraded file and still restores the old one, and a new
-  one works; and the CLI's table, JSON and CSV output.
+  one works; the CLI's table, JSON and CSV output; and that without `--apply`
+  the command prints its notice, fails, and leaves the database, its log and
+  its journal byte for byte as they were.
 - By hand with 0.18.1: a file it created with full-text indexes, vectors and a
   property index gave the same query, search and changefeed results through
   this release's library before and after `compact --upgrade-id-keys` (except

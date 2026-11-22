@@ -899,7 +899,7 @@ test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every out
     }
 
     {
-        const run = try runCli(allocator, &.{ "compact", paths[0], "--upgrade-id-keys" });
+        const run = try runCli(allocator, &.{ "compact", paths[0], "--upgrade-id-keys", "--apply" });
         defer run.deinit(allocator);
         try expectOutput(run, &.{
             "Upgraded the id keys of",
@@ -912,12 +912,12 @@ test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every out
         });
     }
     {
-        const run = try runCli(allocator, &.{ "compact", paths[1], "--upgrade-id-keys", "--upgrade-indexes", "--format=json" });
+        const run = try runCli(allocator, &.{ "compact", paths[1], "--upgrade-id-keys", "--apply", "--upgrade-indexes", "--format=json" });
         defer run.deinit(allocator);
         try expectOutput(run, &.{ "\"indexes_rebuilt\":", "\"id_keys_upgraded\":true,\"id_keys\":\"big-endian\",\"id_key_entries_checked\":" });
     }
     {
-        const run = try runCli(allocator, &.{ "compact", paths[2], "--upgrade-id-keys", "--format=csv" });
+        const run = try runCli(allocator, &.{ "compact", paths[2], "--upgrade-id-keys", "--apply", "--format=csv" });
         defer run.deinit(allocator);
         try expectOutput(run, &.{ "path,pages_before,pages_after,pages_removed,bytes_reclaimed,id_keys_upgraded,id_keys,id_key_entries_checked,id_key_pages_freed,upgrade_bytes_before,upgrade_bytes_after\n", ",true,big-endian," });
     }
@@ -935,7 +935,8 @@ test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every out
         try lupk.Fingerprint.expectEqual(expected, try lupk.fingerprint(db, built.last_event));
     }
 
-    // Again on a format-5 file: nothing to upgrade, and it still compacts.
+    // Again on a format-5 file: nothing to upgrade, so nothing to agree to
+    // with --apply, and it still compacts.
     {
         const run = try runCli(allocator, &.{ "compact", paths[0], "--upgrade-id-keys" });
         defer run.deinit(allocator);
@@ -944,6 +945,59 @@ test "cli: compact --upgrade-id-keys upgrades a little-endian file, in every out
         defer json.deinit(allocator);
         try expectOutput(json, &.{"\"id_keys_upgraded\":false"});
     }
+}
+
+test "cli: compact --upgrade-id-keys without --apply says what the upgrade costs and changes nothing" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lupk_cli_confirm.ltdb";
+    lupk.cleanup(path);
+    defer lupk.cleanup(path);
+    _ = try lupk.buildLegacy(path, 0);
+    const files = [_][]const u8{ "", "-wal", "-journal", ".upgrade-id-keys" };
+    const before = try lupk.hashFiles(path, &files);
+
+    for ([_][]const []const u8{
+        &.{ "compact", path, "--upgrade-id-keys" },
+        &.{ "compact", path, "--upgrade-id-keys", "--upgrade-indexes", "--format=json" },
+    }) |argv| {
+        const run = try runCli(allocator, argv);
+        defer run.deinit(allocator);
+        const needles = [_][]const u8{
+            path ++ " has not been changed. Upgrading it to format 5 needs --apply.",
+            "It cannot be undone. LatticeDB 0.18 and earlier cannot open",
+            "Replication starts over.",
+            "Replicate to a new, empty directory afterwards.",
+            "room on disk for a second copy",
+            "lattice compact " ++ path ++ " --upgrade-id-keys --apply",
+        };
+        for (needles) |needle| {
+            if (run.succeeded() or run.stdout.len != 0 or std.mem.indexOf(u8, run.stderr, needle) == null) {
+                std.debug.print("expected {s}\nexit {?d}\nstdout: {s}\nstderr: {s}\n", .{ needle, run.exit_code, run.stdout, run.stderr });
+                return error.TestUnexpectedResult;
+            }
+        }
+        // Not the upgrade, and not the rest of compact either.
+        try std.testing.expectEqualSlices(u8, &before, &(try lupk.hashFiles(path, &files)));
+    }
+    {
+        const info = try runCli(allocator, &.{ "info", path });
+        defer info.deinit(allocator);
+        try expectOutput(info, &.{"Id keys:      little-endian"});
+    }
+
+    // --apply on its own asks for nothing.
+    {
+        const run = try runCli(allocator, &.{ "compact", path, "--apply" });
+        defer run.deinit(allocator);
+        try std.testing.expect(!run.succeeded());
+        try std.testing.expect(std.mem.indexOf(u8, run.stderr, "--apply goes with 'compact --upgrade-id-keys'.") != null);
+        try std.testing.expectEqualSlices(u8, &before, &(try lupk.hashFiles(path, &files)));
+    }
+
+    // With it, the same command upgrades.
+    const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys", "--apply" });
+    defer run.deinit(allocator);
+    try expectOutput(run, &.{"Upgraded the id keys of"});
 }
 
 test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopped at any point" {
@@ -990,7 +1044,7 @@ test "cli: compact --upgrade-id-keys finishes the job after an earlier run stopp
             },
         }
 
-        const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys" });
+        const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys", "--apply" });
         defer run.deinit(allocator);
         try expectOutput(run, &.{if (stop == .renamed) "Id keys are already big-endian" else "Upgraded the id keys of"});
         for ([_][]const u8{ copy, copy ++ "-wal", copy ++ ".partial", copy ++ "-journal" }) |name| {
@@ -1021,7 +1075,7 @@ test "cli: a second compact --upgrade-id-keys while the database is in use leave
     }
     const before = try lupk.hashFiles(copy, &.{""});
 
-    const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys" });
+    const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys", "--apply" });
     defer run.deinit(allocator);
     try std.testing.expect(!run.succeeded());
     try std.testing.expect(lupk.exists(copy));
@@ -1046,7 +1100,7 @@ test "cli: replicate says why it refuses a directory made before the id key upgr
         try expectOutput(run, &.{""});
     }
     {
-        const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys" });
+        const run = try runCli(allocator, &.{ "compact", path, "--upgrade-id-keys", "--apply" });
         defer run.deinit(allocator);
         try expectOutput(run, &.{"The file has a new id: replicate it to a new directory, not an old one."});
     }

@@ -128,7 +128,7 @@ read.
 
 #### Upgrading an older file
 
-`lattice compact --upgrade-id-keys` converts a little-endian file, one-way
+`lattice compact --upgrade-id-keys --apply` converts a little-endian file, one-way
 (`Database.upgradeIdKeysTo` in `src/storage/id_key_upgrade.zig`). It never
 works on the file itself. It copies the database with `backup`, converts the
 copy, checks the copy against the original, which is still open, and only then

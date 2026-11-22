@@ -775,10 +775,37 @@ A file created by 0.18 or earlier stores its ids little-endian (`lattice info`
 says `Id keys: little-endian`). It keeps working as it is: this release reads and
 writes it in that layout, and you never have to upgrade it. Upgrading gives it the
 format-5 layout, where ids are stored in order, so scans return ascending ids and
-the id trees are full. `--upgrade-id-keys` does it:
+the id trees are full. `--upgrade-id-keys` does it, and it asks before it does.
+Run it first without `--apply`:
 
 ```bash
 lattice compact social.lattice --upgrade-id-keys
+```
+
+```text
+social.lattice has not been changed. Upgrading it to format 5 needs --apply.
+
+Before you go ahead:
+  - It cannot be undone. LatticeDB 0.18 and earlier cannot open the
+    upgraded file.
+  - Replication starts over. The upgraded file gets a new id, so a
+    directory 'lattice replicate' already writes to will refuse it.
+    Replicate to a new, empty directory afterwards. The old directory
+    still restores the database as it was before the upgrade.
+  - It needs room on disk for a second copy of the database (about
+    2 MB), and no other program may have the database open.
+
+Are you sure? To continue, run:
+  lattice compact social.lattice --upgrade-id-keys --apply
+```
+
+That run opens the database read-only, changes nothing, and exits with status 1,
+so a script that forgot `--apply` does not carry on as if the file were upgraded.
+The notice goes to standard error in every output format. `--apply` is what does
+the upgrade:
+
+```bash
+lattice compact social.lattice --upgrade-id-keys --apply
 ```
 
 ```text
@@ -806,12 +833,12 @@ Compacted database: social.lattice
 refuse it. There is no command to go back. Keep a backup if an older release still
 has to open the data.
 
-The original is not touched until a converted copy has passed every check. The
-command:
+The original is not touched until a converted copy has passed every check. With
+`--apply`, the command:
 
 1. Opens the database, which locks it, and keeps it locked to the end. A second
-   `compact --upgrade-id-keys` on the same file stops here, without touching the first
-   one's copy.
+   `compact --upgrade-id-keys --apply` on the same file stops here, without touching
+   the first one's copy.
 2. Copies the database to `<path>.upgrade-id-keys` beside it, the way `backup` does.
 3. Rewrites the five trees keyed by id in the copy: the node tree, the edge-ID index,
    the full-text document lengths and reverse index, and the vector index's node
@@ -868,8 +895,9 @@ file stayed at 133 MB, taking the new data into its freed pages. The other grew
 from 125 MB to 153 MB.
 
 With a file that is already format 5 the command says `Id keys are already
-big-endian (format 5); nothing to upgrade.` and just compacts. It can be combined
-with `--upgrade-indexes`.
+big-endian (format 5); nothing to upgrade.` and just compacts, with or without
+`--apply`: there is nothing left to agree to. It can be combined with
+`--upgrade-indexes`. `--apply` without `--upgrade-id-keys` is an error.
 
 ### Keeping the changefeed in check
 
@@ -1026,7 +1054,7 @@ lattice count social.lattice --format=csv >> counts.csv
 |---------|--------------|
 | `create <path>` | Make a new database |
 | `info <path>` | Show file size, counts, features, indexes, and which releases can open it |
-| `compact <path>` | Give free pages at the end of the file back to the OS; `--upgrade-id-keys` converts an older file to format 5 |
+| `compact <path>` | Give free pages at the end of the file back to the OS; `--upgrade-id-keys --apply` converts an older file to format 5 |
 | `checkpoint <path>` | Flush pending writes into the file and reset the log |
 | `changefeed <path>` | Show the changefeed, set how much of it to keep, trim it |
 | `backup <path>` | Copy to another file while the database stays open |

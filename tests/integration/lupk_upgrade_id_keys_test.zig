@@ -933,7 +933,9 @@ test "upgrade id keys: the database stays locked from the upgrade's open to the 
         {
             var buf: [256]u8 = undefined;
             const wal = try std.fmt.bufPrint(&buf, "{s}-wal", .{path});
-            const file = try compat.fs.cwd().createFile(wal, .{ .truncate = false });
+            // Opened for reading too: Windows refuses to stat a handle that
+            // can only write.
+            const file = try compat.fs.cwd().createFile(wal, .{ .truncate = false, .read = true });
             defer file.close();
             const size = (try file.stat()).size;
             const extra = [_]u8{1} ** 8192;

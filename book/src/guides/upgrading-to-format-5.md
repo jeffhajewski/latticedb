@@ -115,7 +115,7 @@ Before you go ahead:
   - It needs room on disk for a second copy of the database (about
     2 MB), and no other program may have the database open.
 
-Are you sure? To continue, run:
+Are you sure? To continue, run the command again with --apply:
   lattice compact social.lattice --upgrade-id-keys --apply
 ```
 

@@ -1017,7 +1017,7 @@ fn confirmIdKeyUpgrade(allocator: std.mem.Allocator, stderr: anytype, parsed_arg
         \\  - It needs room on disk for a second copy of the database (about
         \\    {d} MB), and no other program may have the database open.
         \\
-        \\Are you sure? To continue, run:
+        \\Are you sure? To continue, run the command again with --apply:
         \\  lattice compact {s} --upgrade-id-keys --apply
         \\
     , .{ path, megabytes, path });

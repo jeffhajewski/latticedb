@@ -8,16 +8,36 @@ produce these tables are under [Reproducing](#reproducing).
 
 | | |
 |---|---|
-| Version | 0.17.0 (`release/0.17.0` at 75de895), ReleaseFast |
+| Version | 0.17.0 (`release/0.17.0` at 75de895), ReleaseFast. The two tables marked **format 5** are the build after 0.18.1 (`main` at 9f087a04) |
 | Machine | Apple M5, 10 cores, 24 GB, internal SSD, macOS 26.5 |
-| Date | 2026-11-13 |
-| Defaults | write-ahead log on; sync mode `full` (the log is fsynced on every commit; plain `fsync`, not `F_FULLFSYNC`); 100 MB page cache; changefeed keeps every event; automatic checkpoint every 1,000 log frames |
-| Load | one thread; nothing else measuring or building, desktop applications open (load average about 2) |
+| Date | 2026-11-13; the format-5 tables 2026-11-20 and 2026-11-22 |
+| Defaults | write-ahead log on; sync mode `full` (the log is fsynced on every commit; plain `fsync`, not `F_FULLFSYNC`); 100 MB page cache; changefeed keeps every event; automatic checkpoint every 1,000 log frames (since format 5, every 3,200 with this cache) |
+| Load | one thread; nothing else measuring or building, desktop applications open (load average about 2; about 4 on 2026-11-22) |
 
 Each row ran several times (five unless it says otherwise), each run a fresh
 process on a fresh database. A figure is the **median of the runs**; the range in
 brackets is the lowest and highest run. Within a run, p50 and p99 are taken over
 every timed operation. Times are wall-clock.
+
+**What was measured again, and what was not.** The release after 0.18.1 changes
+how ids are stored (file format 5) and how a commit files new relationships, and
+both show in batched writes and bulk loads. Those were measured again on that
+build and have their own tables below. Everything else on this page is still
+0.17.0's run.
+
+The other rows were checked on the new build on 2026-11-22, with 0.18.1 run
+beside it: the median commit, the Cypher lookups, the traversals and vector
+search at 100,000 came out level between the two builds. Two things moved.
+`lattice_node_get_property` took 0.24 us where 0.18.1 took 0.22, in each of
+three alternating runs. And a full-text index is smaller in a format-5 file: 31
+MB and 141 MB for the two sizes below, where the table says 36 and 172, with
+search times unchanged.
+
+That day's figures are not in the tables. The machine was in use, and both
+builds measured behind this page: by a few percent on the small workloads, and by
+15 to 30% on traversal and vector search at 100,000, the two that do not fit the
+processor's cache. The builds agreed with each other, so the tables keep the
+quieter 0.17.0 run.
 
 ## Writes
 
@@ -48,6 +68,25 @@ time to close the database is not included).
 | 1,000 | 332,000 [320,000–337,000] | 2.4 ms | 247,000 [245,000–248,000] |
 | 10,000 | 351,000 [345,000–353,000] | 27 ms | 252,000 [244,000–254,000] |
 
+**Format 5.** The same two workloads on the build after 0.18.1, with 0.18.1 run
+beside it on the same day (2026-11-22, the machine in use):
+
+| Transaction size | Nodes/s | Time per transaction | 0.18.1 | Edges/s (100K nodes) | 0.18.1 |
+|-----------------:|--------:|---------------------:|-------:|---------------------:|-------:|
+| 1,000 | 408,000 [386,000–420,000] | 2.1 ms | 319,000 | 320,000 [314,000–325,000] | 219,000 |
+| 10,000 | 416,000 [409,000–425,000] | 21 ms | 338,000 | 372,000 [359,000–376,000] | 220,000 |
+
+Nodes are a quarter faster because a new id now goes to the right edge of the
+node tree instead of a different page each time
+([Id Key Order](../architecture/graph-storage.md#id-key-order)). Relationships
+gain more, and more the larger the transaction, because a commit that creates 64
+or more of them sorts their tree entries and inserts them in order
+([Bulk loading](../configuration/durability.md#bulk-loading)). 0.18.1's figures
+that day are 4 to 13% below the 0.17.0 rows above, so read the new rows as a
+little low too. Transactions of 10 and 100 rows are not in this table: an fsync
+per transaction decides them, the disk stalled often that day, and the two
+builds' runs overlapped.
+
 ### Other settings
 
 These rows change one setting from the defaults, and are labelled so.
@@ -60,21 +99,45 @@ These rows change one setting from the defaults, and are labelled so.
 `normal` hands each commit to the operating system without waiting for the disk:
 it survives the process being killed, and a power cut can lose the last commits
 (see [Durability](../configuration/durability.md)). Once a transaction holds a
-thousand rows the fsync no longer shows.
+thousand rows the fsync no longer shows. (On the format-5 build the second row
+measured 423,000/s [406,000–444,000] on 2026-11-22, beside 408,000/s with `full`.)
 
 ### Bulk load
 
-1,000,000 nodes, then 2,000,000 edges between random pairs of them, in
-transactions of 10,000, then close (three runs).
+1,000,000 nodes, then 2,000,000 edges between random pairs of them, then close
+(three runs).
+
+**Format 5**, the build after 0.18.1, measured 2026-11-20 on a quiet machine:
+
+| Settings | Rows per transaction | Total | Nodes | Edges | File | Peak memory |
+|----------|---------------------:|------:|------:|------:|-----:|------------:|
+| Defaults | 10,000 | 23.4 s [22.4–23.5] | 2.3 s | 20.9 s | 451 MB | 130 MB |
+| Defaults | 100,000 | 11.3 s [11.1–11.8] | 2.7 s | 8.6 s | 461 MB | 190 MB |
+| Defaults | 1,000,000 | 8.7 s [8.7–9.0] | 2.7 s | 6.1 s | 458 MB | 680 MB |
+| No log, changefeed off, 1 GB cache ([the bulk-load recipe](../configuration/durability.md#bulk-loading)) | 10,000 | 6.4 s [6.3–6.5] | 0.8 s | 5.2 s | 315 MB | 1.1 GB |
+
+Before format 5, in transactions of 10,000 (0.17.0; 0.18.1 took 35.9 s and 8.2 s
+for these two rows on 2026-11-20):
 
 | Settings | Total | Nodes | Edges | File | Peak memory |
 |----------|------:|------:|------:|-----:|------------:|
 | Defaults | 34.4 s [34.3–35.0] | 3.5 s | 30.9 s | 500 MB | 175 MB |
-| No log, changefeed off, 1 GB cache ([the bulk-load recipe](../configuration/durability.md#bulk-loading)) | 7.9 s [7.8–8.0] | 1.1 s | 6.3 s | 364 MB | 1.1 GB |
+| No log, changefeed off, 1 GB cache | 7.9 s [7.8–8.0] | 1.1 s | 6.3 s | 364 MB | 1.1 GB |
 
 The recipe gives up crash safety for the load (an interrupted load is started
 again from its source) and the changefeed's record of it; the file is smaller
 because the changefeed holds no events.
+
+Before format 5 the size of the transaction made almost no difference to a
+load: 0.18.1 took 35.9 s at 10,000 rows and 33.6 s at 100,000. Now it is the
+first thing to change, and
+[Bulk loading](../configuration/durability.md#bulk-loading) has the full table,
+with what each setting writes to disk.
+
+The format-5 rows are from the branch before it was merged. They were run again
+on the merged commit on 2026-11-22, with the machine in use: every configuration
+wrote the same amount to disk and the same size of file as on the 20th, and took
+6 to 18% longer, as 0.18.1 did beside it.
 
 ## Point lookups
 
@@ -227,7 +290,9 @@ zig build capi-benchmark -- --suite core --json now.json   # keep every run's nu
 Each row prints its median and range; `--json` keeps every run. One workload can be
 run by hand, for example
 `zig-out/bin/capi-bench commit_node --db /tmp/x.db --ops 5000`; it prints one
-`RESULT` line.
+`RESULT` line. The bulk-load rows with 100,000 and 1,000,000 rows per transaction
+were run that way, since the suite loads in transactions of 10,000:
+`zig-out/bin/capi-bench bulk --db /tmp/x.db --n 1000000 --degree 2 --batch 100000`.
 
 To compare two versions with the same program, build it against the other
 checkout and compare the saved runs:

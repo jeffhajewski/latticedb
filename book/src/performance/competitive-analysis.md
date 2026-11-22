@@ -48,6 +48,12 @@ paths (SQLite's walk may reuse an edge, which Cypher's may not; that differs by 
 path in 3,905). The single-commit p50s are within each other's run-to-run spread
 (SQLite's runs ranged 39–50 us, LatticeDB's 44–45 us); 20,000 commits a run.
 
+The insert row is the one the release after 0.18.1 changes. Measured on that
+build on 2026-11-22, in a new format-5 file, LatticeDB created 408,000 nodes a
+second in transactions of 1,000 (0.18.1 beside it: 319,000), and SQLite inserted
+1,850,000 rows a second in the same session. SQLite is still four to five times
+faster at inserts.
+
 Read this plainly: for one to three hops from an indexed starting point, an
 indexed SQLite join is as fast as LatticeDB's Cypher. LatticeDB is about twice as
 fast enumerating longer paths, and SQLite inserts rows several times faster than

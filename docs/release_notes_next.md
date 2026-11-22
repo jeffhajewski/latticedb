@@ -32,7 +32,11 @@ Use this file as the draft for the next release after `0.18.1`.
   alone:
   the default load went from about 35 s to 27 s, a load without the log from
   8 s to 6.3 s, the node tree from 70.6 MB to 51.9 MB and the edge-ID index from
-  100 MB to 69 MB (both 99% full, from 73% and 69%).
+  100 MB to 69 MB (both 99% full, from 73% and 69%). Creating nodes in
+  transactions of 1,000 measured 408,000 nodes a second, against 319,000 for
+  0.18.1 in the same session. A full-text index is smaller too, because its
+  document trees are keyed by id: 100,000 documents of 50 words make a 141 MB
+  file where 0.18.1 makes 172 MB.
 - **Older files can be upgraded to the new layout.** `lattice compact <path>
   --upgrade-id-keys --apply` converts a database created by 0.18.1 or earlier
   to format 5. Without `--apply` the command changes nothing: it says that the
@@ -62,7 +66,9 @@ Use this file as the draft for the next release after `0.18.1`.
   in order, then writes the relationship records. Each page gets everything the
   transaction has for it in one visit. The gain grows with the transaction: at
   10,000 relationships a transaction has about one entry per page it touches,
-  at 100,000 about four. See the table below and
+  at 100,000 about four. Into a graph of 100,000 nodes, relationships in
+  transactions of 10,000 went in at 372,000 a second, against 220,000 for
+  0.18.1 in the same session. See the table below and
   [Bulk loading](../book/src/configuration/durability.md#bulk-loading).
 - **Bulk load, all three changes together.** 1,000,000 nodes and 2,000,000
   relationships between random pairs, through the C API, median of three runs
@@ -200,6 +206,10 @@ Use this file as the draft for the next release after `0.18.1`.
   a record in the file, which only this release's recovery completes. Checked
   with 0.18.1 on an old-layout file interrupted that way: refused before
   recovery, read correctly after this release had opened it once.
+- **Reads measure as before, with one small exception.** Run beside 0.18.1,
+  Cypher lookups, traversals and vector search came out level.
+  `lattice_node_get_property` inside an open read transaction took 0.24 us
+  where 0.18.1 took 0.22, in each of three alternating runs.
 - For loads, prefer large transactions (100,000 relationships or more) over
   many small ones; a transaction holds 600 to 700 bytes of memory per row until
   it commits.
@@ -221,6 +231,12 @@ Use this file as the draft for the next release after `0.18.1`.
 
 ## Validation Notes
 
+- The bulk-load table was measured on 2026-11-20, on the branch before it was
+  merged and with nothing else running. It was run again on the merged commit
+  on 2026-11-22 with the machine in use: every configuration wrote the same
+  amount to disk and the same size of file, and took 6 to 18% longer, as 0.18.1
+  did beside it. The batched-write and read comparisons in these notes are from
+  the 22nd, each with 0.18.1 measured in the same session.
 - The id key upgrade is tested on an old-layout database with something in
   every tree it rewrites: nodes with several labels, lists and values larger
   than a page, ids past 256 and 65,536, deleted nodes and relationships,

@@ -192,9 +192,9 @@ over. For such a load:
 - then close (or, in Zig, `sync()`).
 
 Loading 1,000,000 nodes and 2,000,000 relationships between random pairs of them
-through the C API (ReleaseFast, Apple M5, a new format-5 file, the median of three
-runs; "defaults" are the log on with `full` sync, the changefeed keeping every
-event, and a 100 MB cache):
+through the C API (ReleaseFast, Apple M5, 2026-11-20, a new format-5 file, the
+median of three runs; "defaults" are the log on with `full` sync, the changefeed
+keeping every event, and a 100 MB cache):
 
 | Settings | Rows per transaction | Time | Written to disk | File | 0.18.1 |
 |----------|---------------------:|-----:|----------------:|-----:|-------:|
@@ -217,8 +217,9 @@ With the default cache and 10,000 rows or fewer, most of the time still goes to
 writing the same pages again: 25 GB written for a 450 MB file. If the transactions
 cannot be larger, a larger cache does the same job.
 
-The figures on the [Benchmarks](../performance/benchmarks.md#bulk-load) page are
-from 0.17.0 and are replaced when that page is next measured as a whole.
+[Benchmarks](../performance/benchmarks.md#bulk-load) splits the same runs into
+the time for the nodes and the time for the relationships, and has the rates for
+batched writes into a smaller graph.
 
 ## Checkpointing
 

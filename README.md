@@ -288,12 +288,20 @@ and the spreads are in [Benchmarks](book/src/performance/benchmarks.md), and
 | Vector top-10, 1M vectors, default 100 MB cache (recall@10 95.6%) | 1.34 ms | 3.1 ms |
 | Vector top-10, 1M vectors, 2 GB cache | 0.21 ms | 0.46 ms |
 
-With `sync_mode = normal` a single commit takes 6.4 μs. Loading 1M nodes and 2M
-edges takes 34 s with the defaults and 8 s with the
-[bulk-load recipe](book/src/configuration/durability.md#bulk-loading). Against
-SQLite through its own C API with the same durability, LatticeDB is level for one
-to three hops and about twice as fast for `*1..5`, while SQLite inserts rows several
-times faster; see [Competitive Analysis](book/src/performance/competitive-analysis.md),
+With `sync_mode = normal` a single commit takes 6.4 μs.
+
+Batched writes and bulk loads were measured again on the build after 0.18.1,
+which creates format-5 files (2026-11-20 and 2026-11-22). Nodes in transactions
+of 1,000 go in at 408,000 a second. 1M nodes and 2M edges load in 23 s with the
+defaults in transactions of 10,000, in 11 s in transactions of 100,000, and in
+6.4 s with the
+[bulk-load recipe](book/src/configuration/durability.md#bulk-loading); 0.18.1
+took 36 s, 34 s and 8 s.
+
+Against SQLite through its own C API with the same durability, LatticeDB is
+level for one to three hops and about twice as fast for `*1..5`, while SQLite
+inserts rows several times faster; see
+[Competitive Analysis](book/src/performance/competitive-analysis.md),
 which also lists other systems' published figures, as citations kept apart from
 these measurements.
 

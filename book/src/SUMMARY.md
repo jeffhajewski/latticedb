@@ -32,6 +32,7 @@
 - [Working with Embeddings](./guides/embeddings.md)
 - [Full-Text Search](./guides/full-text-search.md)
 - [Migrating to Per-Property FTS](./guides/migrating-to-per-property-fts.md)
+- [Upgrading to Format 5](./guides/upgrading-to-format-5.md)
 - [Durable Streams](./guides/durable-streams.md)
 - [The Changefeed](./guides/changefeed.md)
 - [Data Export](./guides/data-export.md)

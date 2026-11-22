@@ -156,7 +156,8 @@ pub const FileHeader = extern struct {
         pub const fulltext_positions: u16 = 0x08;
         /// Big-endian id keys (`FileFlags.ORDERED_ID_KEYS`): a format-4
         /// release would decode every node, edge and document id wrongly.
-        /// Set when the file is created, never later.
+        /// Set with the flag: when the file is created, or by the id key
+        /// upgrade on its converted copy.
         pub const ordered_id_keys: u16 = 0x10;
 
         pub const all = [_]struct { bit: u16, name: []const u8, version: u16 }{
@@ -413,8 +414,10 @@ pub const FileFlags = struct {
     /// Ids are written as big-endian B-tree keys in the node tree, the edge
     /// id index, the full-text document trees and the vector index's node
     /// tree, so key order is id order (format 5; see `id_key.zig`). Set when
-    /// the file is created and never changed. Without it those keys are
-    /// little-endian, as every file before format 5 has them.
+    /// the file is created, or on the converted copy that `lattice compact
+    /// --upgrade-id-keys` puts in an older file's place; an open never sets
+    /// it and nothing clears it. Without it those keys are little-endian, as
+    /// every file created before format 5 has them.
     pub const ORDERED_ID_KEYS: u32 = 0x40;
 };
 

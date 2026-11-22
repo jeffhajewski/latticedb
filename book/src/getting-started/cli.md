@@ -773,7 +773,9 @@ reports how many it rebuilt as `Indexes rebuilt:`.
 
 A file created by 0.18 or earlier stores its ids little-endian (`lattice info`
 says `Id keys: little-endian`). It keeps working as it is: this release reads and
-writes it in that layout, and you never have to upgrade it. Upgrading gives it the
+writes it in that layout, and you never have to upgrade it
+([Upgrading to Format 5](../guides/upgrading-to-format-5.md) has which release
+opens which file, and when upgrading is worth it). Upgrading gives it the
 format-5 layout, where ids are stored in order, so scans return ascending ids and
 the id trees are full. `--upgrade-id-keys` does it, and it asks before it does.
 Run it first without `--apply`:

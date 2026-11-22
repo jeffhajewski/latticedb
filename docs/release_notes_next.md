@@ -47,7 +47,10 @@ Use this file as the draft for the next release after `0.18.1`.
   deleted and the original is as it was. **The upgrade is one-way: 0.18 and
   earlier cannot open the upgraded file**, and there is no way back but an
   export from this release. See
-  [Upgrading an older file to format 5](../book/src/getting-started/cli.md#upgrading-an-older-file-to-format-5).
+  [Upgrading to Format 5](../book/src/guides/upgrading-to-format-5.md) for
+  which release opens which file and when to upgrade, and
+  [Upgrading an older file to format 5](../book/src/getting-started/cli.md#upgrading-an-older-file-to-format-5)
+  for what the command does.
 - **Large transactions load relationships much faster.** A relationship has two
   entries in the edge tree, one under each of its nodes, and they belong wherever
   those nodes' other relationships are. Applied one relationship at a time, a
